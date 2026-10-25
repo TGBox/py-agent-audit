@@ -120,6 +120,11 @@ def get_default_search_paths() -> dict[str, list[Path]]:
     if claude_code_dir.exists():
         paths["Claude Code"].append(claude_code_dir)
 
+    # TokenOptimizer Bottlenecks
+    bottleneck_log = userprofile / ".mcp_bottlenecks.jsonl"
+    if bottleneck_log.exists():
+        paths["TokenOptimizer"] = [bottleneck_log]
+
     return paths
 
 
@@ -287,6 +292,40 @@ def scan_claude_code(base_dir: Path) -> list[Finding]:
     return findings
 
 
+def scan_bottleneck_logs(log_path: Path) -> list[Finding]:
+    """Scan ~/.mcp_bottlenecks.jsonl for agent-reported routine bottlenecks."""
+    findings: list[Finding] = []
+    target_files = [log_path] if log_path.is_file() else list(log_path.glob("*.jsonl"))
+    for file_path in target_files:
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        for line_idx, line in enumerate(content.splitlines(), start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                task = data.get("task", "Unbekannte Aufgabe")
+                steps = data.get("steps", 0)
+                reason = data.get("reason", "")
+                findings.append(
+                    Finding(
+                        name=f"Bottleneck: {task}",
+                        kind="Agent Bottleneck",
+                        provider="TokenOptimizer",
+                        file_path=file_path,
+                        line_number=line_idx,
+                        context=f"{steps} Schritte | Grund: {reason}"[:200],
+                    )
+                )
+            except json.JSONDecodeError:
+                continue
+    return findings
+
+
 def aggregate_findings(findings: list[Finding]) -> list[AuditEntry]:
     """Aggregate individual findings into a sorted list of AuditEntry objects."""
     grouped: dict[tuple[str, str, str], list[Finding]] = defaultdict(list)
@@ -333,6 +372,8 @@ def scan_sources(
             all_findings.extend(scan_ollama_logs(path))
         elif provider == "Claude Code":
             all_findings.extend(scan_claude_code(path))
+        elif provider == "TokenOptimizer":
+            all_findings.extend(scan_bottleneck_logs(path))
         else:
             # Custom Workspace or generic directory
             all_findings.extend(scan_markdown_artifacts(path, provider=provider))

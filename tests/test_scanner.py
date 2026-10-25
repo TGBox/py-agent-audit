@@ -6,7 +6,7 @@ from src.scanner import (
     aggregate_findings,
     extract_command_key,
     generate_skill_markdown,
-    get_default_search_paths,
+    scan_bottleneck_logs,
     scan_claude_logs,
     scan_copilot_sessions,
     scan_markdown_artifacts,
@@ -153,10 +153,15 @@ def test_scan_sources(tmp_path: Path):
     assert "pytest -v" in names
 
 
-def test_get_default_search_paths():
-    paths = get_default_search_paths()
-    assert "Claude Desktop" in paths
-    assert "Antigravity" in paths
-    assert "GitHub Copilot" in paths
-    assert "Ollama" in paths
-    assert "Claude Code" in paths
+def test_scan_bottleneck_logs(tmp_path: Path):
+    log_file = tmp_path / "bottlenecks.jsonl"
+    log_file.write_text(
+        '{"timestamp": "2026-10-25T12:00:00", "task": "Run tests repeatedly", "steps": 7, "reason": "Failing test cycle"}\n',
+        encoding="utf-8",
+    )
+    findings = scan_bottleneck_logs(log_file)
+    assert len(findings) == 1
+    assert findings[0].name == "Bottleneck: Run tests repeatedly"
+    assert findings[0].kind == "Agent Bottleneck"
+    assert findings[0].provider == "TokenOptimizer"
+    assert "7 Schritte" in findings[0].context

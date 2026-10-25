@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.mcp_installer import install_to_claude_desktop, is_installed_in_claude_desktop
 from src.scanner import (
     AuditEntry,
     generate_skill_markdown,
@@ -101,6 +102,17 @@ QPushButton#actionBtn {
 
 QPushButton#actionBtn:hover {
     background-color: #94e2d5;
+}
+
+QPushButton#installBtn {
+    background-color: #f9e2af;
+    color: #11111b;
+    font-weight: bold;
+    border: none;
+}
+
+QPushButton#installBtn:hover {
+    background-color: #f5c2e7;
 }
 
 QLineEdit, QComboBox {
@@ -210,8 +222,8 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("py-agent-audit — Multi-Source Agent Audit & Skill Generator")
-        self.setMinimumSize(1000, 680)
+        self.setWindowTitle("py-agent-audit — Multi-Source Agent Audit & TokenOptimizer")
+        self.setMinimumSize(1020, 680)
 
         self.entries: list[AuditEntry] = []
         self.worker: ScanWorker | None = None
@@ -239,6 +251,7 @@ class MainWindow(QMainWindow):
         has_copilot = bool(default_paths.get("GitHub Copilot"))
         has_ollama = bool(default_paths.get("Ollama"))
         has_claude_code = bool(default_paths.get("Claude Code"))
+        has_bottlenecks = bool(default_paths.get("TokenOptimizer"))
 
         self.cb_claude = QCheckBox(f"Claude Desktop ({'✓' if has_claude else '–'})")
         self.cb_claude.setChecked(has_claude)
@@ -260,6 +273,13 @@ class MainWindow(QMainWindow):
         self.cb_claude_code.setChecked(has_claude_code)
         sources_layout.addWidget(self.cb_claude_code)
 
+        self.cb_bottlenecks = QCheckBox(f"Engpässe ({'✓' if has_bottlenecks else '–'})")
+        self.cb_bottlenecks.setChecked(has_bottlenecks)
+        self.cb_bottlenecks.setToolTip(
+            "Analysiert vom Agenten gemeldete Routine-Engpässe aus ~/.mcp_bottlenecks.jsonl"
+        )
+        sources_layout.addWidget(self.cb_bottlenecks)
+
         self.btn_add_folder = QPushButton("Workspace-Ordner...")
         self.btn_add_folder.clicked.connect(self.add_custom_folder)
         sources_layout.addWidget(self.btn_add_folder)
@@ -269,6 +289,25 @@ class MainWindow(QMainWindow):
         sources_layout.addWidget(self.lbl_custom_count)
 
         sources_layout.addStretch()
+
+        # MCP Installer button with detailed tooltip
+        is_installed = is_installed_in_claude_desktop()
+        self.btn_install_mcp = QPushButton(
+            "✓ MCP in Claude aktiv" if is_installed else "In Claude Desktop installieren"
+        )
+        self.btn_install_mcp.setObjectName("installBtn")
+        self.btn_install_mcp.setToolTip(
+            "Registriert den TokenOptimizer MCP-Server in deiner Claude Desktop Konfiguration "
+            "(%APPDATA%/Claude/claude_desktop_config.json).\n\n"
+            "Folgende 5 Werkzeuge werden Claude zur Verfügung gestellt:\n"
+            "• run_compact_checks: Führt Ruff & Pytest aus und liefert nur kompakte Fehler\n"
+            "• read_python_signatures: Spart 80-90% Tokens durch Lesen reiner Signaturen (ohne Code-Bodies)\n"
+            "• get_compact_git_diff: Kompaktes Git-Diff (U=0) ohne Lockfiles & Assets\n"
+            "• get_project_tree: Bereinigter Projektbaum mit Zeilenzahlen (LOC)\n"
+            "• log_bottleneck: Protokolliert wiederkehrende Agenten-Engpässe in ~/.mcp_bottlenecks.jsonl"
+        )
+        self.btn_install_mcp.clicked.connect(self.install_mcp_to_claude)
+        sources_layout.addWidget(self.btn_install_mcp)
 
         self.btn_scan = QPushButton("Scan starten")
         self.btn_scan.setObjectName("primaryBtn")
@@ -292,7 +331,14 @@ class MainWindow(QMainWindow):
 
         self.combo_kind = QComboBox()
         self.combo_kind.addItems(
-            ["Alle Typen", "CLI Command", "MCP Tool", "Internal Tool", "LLM Endpoint"]
+            [
+                "Alle Typen",
+                "CLI Command",
+                "MCP Tool",
+                "Internal Tool",
+                "LLM Endpoint",
+                "Agent Bottleneck",
+            ]
         )
         self.combo_kind.currentTextChanged.connect(self.apply_filter)
         filter_layout.addWidget(self.combo_kind, stretch=1)
@@ -306,6 +352,7 @@ class MainWindow(QMainWindow):
                 "GitHub Copilot",
                 "Ollama",
                 "Claude Code",
+                "TokenOptimizer",
                 "Workspace",
             ]
         )
@@ -403,6 +450,34 @@ class MainWindow(QMainWindow):
                 self.lbl_custom_count.setText(f"{count} eigene{'r' if count == 1 else ''} Ordner")
                 self.status_label.setText(f"Ordner hinzugefügt: {path}")
 
+    def install_mcp_to_claude(self) -> None:
+        """Install the TokenOptimizer FastMCP server into Claude Desktop config."""
+        reply = QMessageBox.question(
+            self,
+            "TokenOptimizer in Claude Desktop installieren?",
+            "Möchtest du den TokenOptimizer MCP-Server in deiner lokalen Claude Desktop Konfiguration eintragen?\n\n"
+            "Folgende 5 Werkzeuge werden Claude bereitgestellt:\n"
+            "1. run_compact_checks: Kompakte Linter- (Ruff) und Test-Prüfungen (Pytest)\n"
+            "2. read_python_signatures: Token-sparende AST-Signaturen ohne Code-Bodies\n"
+            "3. get_compact_git_diff: Kompaktes Git-Diff (U=0) ohne Lockfiles & Assets\n"
+            "4. get_project_tree: Bereinigter Projektbaum mit Zeilenzahlen (LOC)\n"
+            "5. log_bottleneck: Protokollierung wiederkehrender Engpässe in ~/.mcp_bottlenecks.jsonl\n\n"
+            "Bestehende MCP-Server bleiben erhalten. Es wird vor dem Speichern ein automatisches Backup (.bak) angelegt.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            success, msg = install_to_claude_desktop()
+            if success:
+                self.btn_install_mcp.setText("✓ In Claude aktiv")
+                self.status_label.setText(
+                    "TokenOptimizer erfolgreich in Claude Desktop installiert."
+                )
+                QMessageBox.information(self, "Installation erfolgreich", msg)
+            else:
+                self.status_label.setText("Fehler bei der Installation in Claude Desktop.")
+                QMessageBox.critical(self, "Installationsfehler", msg)
+
     def toggle_scan(self) -> None:
         """Start or cancel the asynchronous scan process."""
         if self.worker and self.worker.isRunning():
@@ -434,6 +509,10 @@ class MainWindow(QMainWindow):
         if self.cb_claude_code.isChecked():
             for p in default_paths.get("Claude Code", []):
                 sources.append((p, "Claude Code"))
+
+        if self.cb_bottlenecks.isChecked():
+            for p in default_paths.get("TokenOptimizer", []):
+                sources.append((p, "TokenOptimizer"))
 
         for p in self.custom_paths:
             sources.append((p, "Workspace"))

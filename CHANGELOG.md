@@ -1,8 +1,12 @@
 # Changelog
 
+## SemVer v0.4.0
+
+- 2026-10-25 (8e9cc29): feat: add mcp token optimizer server with default routines for saving tokens, add 1 click installer for claude desktop, add bottleneck evaluation into the app logic, extend GUI for new features, add tests
+
 ## SemVer v0.3.0
 
-- 2026-10-25 (1c305b7): feat: extend scanner logic to apply to github copilot, ollama and claude code, feat: add function to convert an aggregated command from the list to a skill directly, fix: update old README file, feat: add new plans for next implementation steps
+- 2026-10-25 (10d258c): feat: extend scanner logic to apply to github copilot, ollama and claude code, feat: add function to convert an aggregated command from the list to a skill directly, fix: update old README file, feat: add new plans for next implementation steps
 
 ## SemVer v0.2.0
 

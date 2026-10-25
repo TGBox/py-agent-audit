@@ -32,7 +32,18 @@ def test_main_window_init(qapp):
     assert window.cb_copilot is not None
     assert window.cb_ollama is not None
     assert window.cb_claude_code is not None
+    assert window.cb_bottlenecks is not None
     assert not window.btn_export_skill.isEnabled()
+
+    # Check MCP installer button and detailed tooltip
+    assert window.btn_install_mcp is not None
+    tooltip = window.btn_install_mcp.toolTip()
+    assert "TokenOptimizer" in tooltip
+    assert "run_compact_checks" in tooltip
+    assert "read_python_signatures" in tooltip
+    assert "get_compact_git_diff" in tooltip
+    assert "get_project_tree" in tooltip
+    assert "log_bottleneck" in tooltip
 
 
 def test_main_window_toggle_fullscreen(qapp):
