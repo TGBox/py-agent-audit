@@ -2,7 +2,8 @@
 
 ## SemVer v0.5.0
 
-- 2026-10-25 (69a6116): fix: fix markdownlint warning in todo file
+- 2026-10-25 (a64cafd): docs(readme): add architecture and token-roi explanation for mcp server
+- 2026-10-25 (4aed520): fix: fix markdownlint warning in todo file
 - 2026-10-25 (bd41b1d): feat(server): add polyglot support for Rust, Node/TS, and C#
 
 ## SemVer v0.4.0
