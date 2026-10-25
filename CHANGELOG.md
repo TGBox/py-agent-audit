@@ -2,7 +2,8 @@
 
 ## SemVer v0.5.0
 
-- 2026-10-25 (a64cafd): docs(readme): add architecture and token-roi explanation for mcp server
+- 2026-10-25 (a0fef6b): refactor(gui): relocate mcp install button to footer and update polyglot tooltip
+- 2026-10-25 (c7b69ce): docs(readme): add architecture and token-roi explanation for mcp server
 - 2026-10-25 (4aed520): fix: fix markdownlint warning in todo file
 - 2026-10-25 (bd41b1d): feat(server): add polyglot support for Rust, Node/TS, and C#
 

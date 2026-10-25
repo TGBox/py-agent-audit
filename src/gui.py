@@ -105,14 +105,18 @@ QPushButton#actionBtn:hover {
 }
 
 QPushButton#installBtn {
-    background-color: #f9e2af;
-    color: #11111b;
-    font-weight: bold;
-    border: none;
+    background-color: #262738;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 11px;
 }
 
 QPushButton#installBtn:hover {
-    background-color: #f5c2e7;
+    background-color: #313244;
+    border-color: #89b4fa;
+    color: #ffffff;
 }
 
 QLineEdit, QComboBox {
@@ -288,27 +292,6 @@ class MainWindow(QMainWindow):
         self.lbl_custom_count.setStyleSheet("color: #a6adc8;")
         sources_layout.addWidget(self.lbl_custom_count)
 
-        sources_layout.addStretch()
-
-        # MCP Installer button with detailed tooltip
-        is_installed = is_installed_in_claude_desktop()
-        self.btn_install_mcp = QPushButton(
-            "✓ MCP in Claude aktiv" if is_installed else "In Claude Desktop installieren"
-        )
-        self.btn_install_mcp.setObjectName("installBtn")
-        self.btn_install_mcp.setToolTip(
-            "Registriert den TokenOptimizer MCP-Server in deiner Claude Desktop Konfiguration "
-            "(%APPDATA%/Claude/claude_desktop_config.json).\n\n"
-            "Folgende 5 Werkzeuge werden Claude zur Verfügung gestellt:\n"
-            "• run_compact_checks: Führt Ruff & Pytest aus und liefert nur kompakte Fehler\n"
-            "• read_python_signatures: Spart 80-90% Tokens durch Lesen reiner Signaturen (ohne Code-Bodies)\n"
-            "• get_compact_git_diff: Kompaktes Git-Diff (U=0) ohne Lockfiles & Assets\n"
-            "• get_project_tree: Bereinigter Projektbaum mit Zeilenzahlen (LOC)\n"
-            "• log_bottleneck: Protokolliert wiederkehrende Agenten-Engpässe in ~/.mcp_bottlenecks.jsonl"
-        )
-        self.btn_install_mcp.clicked.connect(self.install_mcp_to_claude)
-        sources_layout.addWidget(self.btn_install_mcp)
-
         self.btn_scan = QPushButton("Scan starten")
         self.btn_scan.setObjectName("primaryBtn")
         self.btn_scan.clicked.connect(self.toggle_scan)
@@ -415,10 +398,36 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 2)
         main_layout.addWidget(splitter, stretch=1)
 
-        # 5. Status bar
+        # 5. Status bar & Footer actions (MCP-Server-Installation dezent abseits platziert)
+        footer_layout = QHBoxLayout()
         self.status_label = QLabel("Bereit. Klicke auf 'Scan starten'.")
         self.status_label.setStyleSheet("color: #a6adc8; font-size: 12px;")
-        main_layout.addWidget(self.status_label)
+        footer_layout.addWidget(self.status_label)
+        footer_layout.addStretch()
+
+        is_installed = is_installed_in_claude_desktop()
+        self.btn_install_mcp = QPushButton(
+            "✓ MCP-Server in Claude aktiv"
+            if is_installed
+            else "MCP-Server in Claude Desktop installieren"
+        )
+        self.btn_install_mcp.setObjectName("installBtn")
+        self.btn_install_mcp.setToolTip(
+            "Registriert den TokenOptimizer FastMCP-Server in deiner lokalen Claude Desktop Konfiguration "
+            "(%APPDATA%/Claude/claude_desktop_config.json).\n\n"
+            "Folgende 5 polyglote Werkzeuge werden Claude zur Verfügung gestellt:\n"
+            "• run_compact_checks: Erkennt automatisch Rust (cargo check), Node/TS (npm test / tsc), "
+            ".NET (dotnet build) und Python (ruff / pytest) und liefert nur kompakte Fehlerzeilen\n"
+            "• read_code_signatures: Spart 80–90% Tokens durch Lesen reiner Signaturen "
+            "(Python, Rust, TypeScript/JS, C#) ohne Code-Bodies (Alias: read_python_signatures)\n"
+            "• get_compact_git_diff: Kompaktes Git-Diff (U=0) ohne Lockfiles (Cargo, npm, uv) & Assets\n"
+            "• get_project_tree: Bereinigter Projektbaum mit Zeilenzahlen (LOC) ohne Build-Ordner\n"
+            "• log_bottleneck: Protokolliert wiederkehrende Agenten-Engpässe direkt nach ~/.mcp_bottlenecks.jsonl"
+        )
+        self.btn_install_mcp.clicked.connect(self.install_mcp_to_claude)
+        footer_layout.addWidget(self.btn_install_mcp)
+
+        main_layout.addLayout(footer_layout)
 
     def setup_shortcuts(self) -> None:
         """Register F11 shortcut for toggling fullscreen mode."""
@@ -454,13 +463,13 @@ class MainWindow(QMainWindow):
         """Install the TokenOptimizer FastMCP server into Claude Desktop config."""
         reply = QMessageBox.question(
             self,
-            "TokenOptimizer in Claude Desktop installieren?",
-            "Möchtest du den TokenOptimizer MCP-Server in deiner lokalen Claude Desktop Konfiguration eintragen?\n\n"
-            "Folgende 5 Werkzeuge werden Claude bereitgestellt:\n"
-            "1. run_compact_checks: Kompakte Linter- (Ruff) und Test-Prüfungen (Pytest)\n"
-            "2. read_python_signatures: Token-sparende AST-Signaturen ohne Code-Bodies\n"
+            "TokenOptimizer MCP-Server in Claude Desktop installieren?",
+            "Möchtest du den TokenOptimizer FastMCP-Server in deiner lokalen Claude Desktop Konfiguration eintragen?\n\n"
+            "Folgende 5 polyglote Werkzeuge werden Claude bereitgestellt:\n"
+            "1. run_compact_checks: Automatische Fehler-Prüfungen für Rust, Node/TS, .NET und Python\n"
+            "2. read_code_signatures: Token-sparende Signaturen (Python, Rust, TS/JS, C#) ohne Rümpfe\n"
             "3. get_compact_git_diff: Kompaktes Git-Diff (U=0) ohne Lockfiles & Assets\n"
-            "4. get_project_tree: Bereinigter Projektbaum mit Zeilenzahlen (LOC)\n"
+            "4. get_project_tree: Bereinigter Projektbaum mit Zeilenzahlen (LOC) ohne Build-Artefakte\n"
             "5. log_bottleneck: Protokollierung wiederkehrender Engpässe in ~/.mcp_bottlenecks.jsonl\n\n"
             "Bestehende MCP-Server bleiben erhalten. Es wird vor dem Speichern ein automatisches Backup (.bak) angelegt.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -469,9 +478,9 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             success, msg = install_to_claude_desktop()
             if success:
-                self.btn_install_mcp.setText("✓ In Claude aktiv")
+                self.btn_install_mcp.setText("✓ MCP-Server in Claude aktiv")
                 self.status_label.setText(
-                    "TokenOptimizer erfolgreich in Claude Desktop installiert."
+                    "TokenOptimizer MCP-Server erfolgreich in Claude Desktop installiert."
                 )
                 QMessageBox.information(self, "Installation erfolgreich", msg)
             else:
