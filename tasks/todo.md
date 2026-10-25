@@ -175,3 +175,24 @@
 **Dependencies:** Task 7  
 **Files likely touched:** `README.md`  
 **Estimated scope:** Small (1 file)
+
+---
+
+## Task 9: Polyglot Support (Rust, Node/TS, C#, Python)
+
+**Description:** Extend the FastMCP TokenOptimizer server (`src/server.py`) to support multi-language projects: auto-detecting ecosystem in `run_compact_checks` (Rust, Node/TS, .NET, Python), multi-language signature extraction in `read_code_signatures`, and cross-ecosystem build directory ignore rules.
+
+**Acceptance criteria:**
+
+- [x] `detect_project_ecosystems()` recognizes Cargo, npm/yarn, dotnet, and Python markers.
+- [x] `run_compact_checks()` executes ecosystem-appropriate checks (`cargo check`, `npm test`, `dotnet build`, `ruff`/`pytest`).
+- [x] `read_code_signatures()` extracts structural definitions for `.py`, `.rs`, `.ts`/`.js`, and `.cs` files while stripping method bodies.
+- [x] Aliased backwards-compatible `read_python_signatures()` maintained.
+- [x] Git diff & project tree ignores build artifacts (`target`, `node_modules`, `bin`, `obj`, `.venv`).
+- [x] Tested in `tests/test_server.py`.
+
+**Verification:**
+
+- [x] All polyglot tests pass: `uv run pytest tests/test_server.py`
+- [x] Ruff lint & formatting clean: `uv run ruff check .`
+

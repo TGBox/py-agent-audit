@@ -1,8 +1,12 @@
 # Changelog
 
+## SemVer v0.5.0
+
+- 2026-10-25 (4778e68): feat(server): add polyglot support for Rust, Node/TS, and C#
+
 ## SemVer v0.4.0
 
-- 2026-10-25 (8e9cc29): feat: add mcp token optimizer server with default routines for saving tokens, add 1 click installer for claude desktop, add bottleneck evaluation into the app logic, extend GUI for new features, add tests
+- 2026-10-25 (3135447): feat: add mcp token optimizer server with default routines for saving tokens, add 1 click installer for claude desktop, add bottleneck evaluation into the app logic, extend GUI for new features, add tests
 
 ## SemVer v0.3.0
 

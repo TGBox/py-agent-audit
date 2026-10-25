@@ -12,14 +12,14 @@ Ein schlankes, responsives Desktop-Audit-Dashboard zur automatisierten Analyse v
 - **TokenOptimizer**: Erfasst gemeldete Agenten-Engpässe (`~/.mcp_bottlenecks.jsonl`).
 - **Benutzerdefinierte Workspaces**: Eigene Projektverzeichnisse können per Klick hinzugefügt werden.
 
-## TokenOptimizer MCP-Server
+## TokenOptimizer MCP-Server (Polyglot)
 
-Das Projekt enthält einen vollständigen FastMCP-Server (`src/server.py`), der Coding-Agenten (z. B. Claude Desktop) 5 hocheffiziente, token-sparende Routine-Werkzeuge bereitstellt:
+Das Projekt enthält einen vollständigen FastMCP-Server (`src/server.py`), der Coding-Agenten (z. B. Claude Desktop) 5 hocheffiziente, token-sparende Routine-Werkzeuge bereitstellt. Der Server ist **polyglot** konzipiert und unterstützt neben Python auch **Rust, Node/TypeScript, .NET/C#** und weitere Umgebungen:
 
-1. **`run_compact_checks(project_dir: str)`**: Führt Ruff & Pytest aus und liefert nur kompakte Fehlerzeilen (keine riesigen Tracebacks).
-2. **`read_python_signatures(file_path: str)`**: Extrahiert AST-Signaturen von Klassen und Funktionen ohne Funktionskörper (80–90% Tokenersparnis).
-3. **`get_compact_git_diff(project_dir: str, staged_only: bool)`**: Liefert Git-Status & Diff mit `--unified=0` unter Ausschluss von Lockfiles und Assets.
-4. **`get_project_tree(project_dir: str, max_depth: int)`**: Erzeugt einen bereinigten Projektbaum inklusive Zeilenzahlen (LOC) pro Codedatei.
+1. **`run_compact_checks(project_dir: str)`**: Erkennt automatisch das Projekt-Ökosystem (Rust: `cargo check`, Node/TypeScript: `npm test` / `npx tsc`, .NET: `dotnet build`, Python: `uv run ruff check` & `uv run pytest`) und liefert nur kompakte Fehlerzeilen ohne riesige Tracebacks.
+2. **`read_code_signatures(file_path: str)`** (Alias: `read_python_signatures`): Extrahiert Signaturen von Klassen, Interfaces, Structs und Funktionen ohne Rumpf für Python (`.py`), Rust (`.rs`), TypeScript/JavaScript (`.ts`, `.tsx`, `.js`, `.jsx`) und C# (`.cs`) (80–90% Tokenersparnis).
+3. **`get_compact_git_diff(project_dir: str, staged_only: bool)`**: Liefert Git-Status & Diff mit `--unified=0` unter automatischem Ausschluss von Lockfiles (`Cargo.lock`, `package-lock.json`, `uv.lock`), Binärdateien und Minified Bundles.
+4. **`get_project_tree(project_dir: str, max_depth: int)`**: Erzeugt einen bereinigten Projektbaum inklusive Zeilenzahlen (LOC) pro Codedatei unter Ausschluss von Build- und Dependency-Ordnern (`target`, `node_modules`, `bin`, `obj`, `.venv` etc.).
 5. **`log_bottleneck(task_description: str, steps_taken: int, reason: str)`**: Ermöglicht dem Agenten, übermäßige Schleifen oder Engpässe direkt nach `~/.mcp_bottlenecks.jsonl` zu melden.
 
 ### 1-Klick Installation in Claude Desktop
