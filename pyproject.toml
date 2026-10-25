@@ -1,6 +1,6 @@
 [project]
 name = "py-agent-audit"
-version = "0.1.0"
+version = "0.1.1"
 description = "A small python app to audit your coding agents log files for the most often used reoccurring tasks, in order to integrate tools for them to reduce your token usage in the future."
 requires-python = ">=3.11"
 license = { text = "MIT" }
