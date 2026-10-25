@@ -1,0 +1,104 @@
+import os
+from pathlib import Path
+
+import pytest
+from PySide6.QtWidgets import QApplication
+
+# Ensure headless execution for tests
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
+from src.gui import MainWindow
+from src.scanner import AuditEntry, Finding
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
+
+
+def test_main_window_init(qapp):
+    window = MainWindow()
+    assert "py-agent-audit" in window.windowTitle()
+    assert window.table.columnCount() == 4
+    assert window.table.rowCount() == 0
+    assert window.shortcut_f11 is not None
+
+
+def test_main_window_toggle_fullscreen(qapp):
+    window = MainWindow()
+    assert not window.isFullScreen()
+
+    window.toggle_fullscreen()
+    assert window.isFullScreen()
+
+    window.toggle_fullscreen()
+    assert not window.isFullScreen()
+
+
+def test_main_window_apply_filter(qapp):
+    window = MainWindow()
+
+    entry1 = AuditEntry(
+        name="pytest tests/",
+        kind="CLI Command",
+        provider="Workspace",
+        count=5,
+        findings=[
+            Finding(
+                "pytest tests/", "CLI Command", "Workspace", Path("test.md"), 10, "pytest tests/"
+            )
+        ],
+    )
+    entry2 = AuditEntry(
+        name="read_resource",
+        kind="MCP Tool",
+        provider="Claude Desktop",
+        count=12,
+        findings=[Finding("read_resource", "MCP Tool", "Claude Desktop", Path("mcp.log"), 1)],
+    )
+
+    window.entries = [entry1, entry2]
+    window.apply_filter()
+
+    assert window.table.rowCount() == 2
+
+    # Filter by name
+    window.search_input.setText("pytest")
+    assert window.table.rowCount() == 1
+    assert window.table.item(0, 0).text() == "pytest tests/"
+
+    # Reset search
+    window.search_input.setText("")
+    assert window.table.rowCount() == 2
+
+    # Filter by kind
+    window.combo_kind.setCurrentText("MCP Tool")
+    assert window.table.rowCount() == 1
+    assert window.table.item(0, 0).text() == "read_resource"
+
+
+def test_main_window_selection_detail(qapp):
+    window = MainWindow()
+
+    entry = AuditEntry(
+        name="git status",
+        kind="CLI Command",
+        provider="Workspace",
+        count=3,
+        findings=[
+            Finding("git status", "CLI Command", "Workspace", Path("notes.md"), 5, "git status"),
+            Finding("git status", "CLI Command", "Workspace", Path("run.md"), 8, "git status"),
+        ],
+    )
+    window.entries = [entry]
+    window.apply_filter()
+
+    assert window.table.rowCount() == 1
+    window.table.selectRow(0)
+
+    assert "git status" in window.lbl_detail_title.text()
+    assert "notes.md:L5" in window.detail_text.toPlainText()
+    assert "run.md:L8" in window.detail_text.toPlainText()

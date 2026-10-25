@@ -1,14 +1,12 @@
-import sys
-import tkinter as tk
+"""Application entry point for py-agent-audit."""
+
+from src.gui import launch_app
 
 
 def main() -> None:
-    root = tk.Tk()
-    root.title("py-agent-audit")
-    root.geometry("800x600")
-    label = tk.Label(root, text="Hallo aus py-agent-audit!", font=("Arial", 18))
-    label.pack(expand=True)
-    root.mainloop()
+    """Run the PySide6 AI agent audit dashboard."""
+    launch_app()
+
 
 if __name__ == "__main__":
     main()
