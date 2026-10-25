@@ -1,8 +1,12 @@
 # Changelog
 
+## SemVer v0.3.0
+
+- 2026-10-25 (1c305b7): feat: extend scanner logic to apply to github copilot, ollama and claude code, feat: add function to convert an aggregated command from the list to a skill directly, fix: update old README file, feat: add new plans for next implementation steps
+
 ## SemVer v0.2.0
 
-- 2026-10-25 (063b4f2): feat: add core scanner logic to parse filepaths, of antigravity and claude, look for cli commands, sanitize the prompts and aggregates the results for displaying them in the table, feat: add pyside6 GUI with background worker thread for the file search, automated checkbox auto select when results were found, dark theme and full screen toggle via f11
+- 2026-10-25 (125edc1): feat: add core scanner logic to parse filepaths, of antigravity and claude, look for cli commands, sanitize the prompts and aggregates the results for displaying them in the table, feat: add pyside6 GUI with background worker thread for the file search, automated checkbox auto select when results were found, dark theme and full screen toggle via f11
 
 ## SemVer v0.1.1
 

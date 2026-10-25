@@ -1,11 +1,16 @@
 from pathlib import Path
 
 from src.scanner import (
+    AuditEntry,
+    Finding,
     aggregate_findings,
     extract_command_key,
+    generate_skill_markdown,
     get_default_search_paths,
     scan_claude_logs,
+    scan_copilot_sessions,
     scan_markdown_artifacts,
+    scan_ollama_logs,
     scan_sources,
     scan_tool_logs,
 )
@@ -71,6 +76,64 @@ def test_scan_tool_logs(tmp_path: Path):
     assert entries[1].count == 1
 
 
+def test_scan_copilot_sessions(tmp_path: Path):
+    session_file = tmp_path / "session-123.json"
+    session_file.write_text(
+        "{\n"
+        '  "requests": [\n'
+        '    {"message": "run test", "response": ["```bash\\npytest -v\\n```"]}\n'
+        "  ]\n"
+        "}",
+        encoding="utf-8",
+    )
+    findings = scan_copilot_sessions(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].name == "pytest -v"
+    assert findings[0].provider == "GitHub Copilot"
+
+
+def test_scan_ollama_logs(tmp_path: Path):
+    log_file = tmp_path / "server.log"
+    log_file.write_text(
+        '[GIN] 2026/10/09 - 20:26:32 | 200 | GET "/api/tags"\n'
+        '[GIN] 2026/10/09 - 20:26:32 | 200 | POST "/api/show"\n'
+        '[GIN] 2026/10/09 - 20:26:32 | 200 | POST "/api/show"\n',
+        encoding="utf-8",
+    )
+    findings = scan_ollama_logs(tmp_path)
+    assert len(findings) == 3
+
+    entries = aggregate_findings(findings)
+    assert len(entries) == 2
+    assert entries[0].name == "ollama /api/show"
+    assert entries[0].count == 2
+    assert entries[1].name == "ollama /api/tags"
+    assert entries[1].count == 1
+
+
+def test_generate_skill_markdown():
+    entry = AuditEntry(
+        name="pytest tests/unit",
+        kind="CLI Command",
+        provider="Antigravity",
+        count=15,
+        findings=[
+            Finding(
+                "pytest tests/unit",
+                "CLI Command",
+                "Antigravity",
+                Path("test.md"),
+                4,
+                "pytest tests/unit",
+            )
+        ],
+    )
+    skill_content = generate_skill_markdown(entry)
+    assert "name: pytest-tests-unit" in skill_content
+    assert "pytest tests/unit" in skill_content
+    assert "15x" in skill_content
+
+
 def test_scan_sources(tmp_path: Path):
     claude_dir = tmp_path / "claude"
     claude_dir.mkdir()
@@ -94,5 +157,6 @@ def test_get_default_search_paths():
     paths = get_default_search_paths()
     assert "Claude Desktop" in paths
     assert "Antigravity" in paths
-    assert isinstance(paths["Claude Desktop"], list)
-    assert isinstance(paths["Antigravity"], list)
+    assert "GitHub Copilot" in paths
+    assert "Ollama" in paths
+    assert "Claude Code" in paths

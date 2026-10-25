@@ -26,6 +26,14 @@ def test_main_window_init(qapp):
     assert window.table.rowCount() == 0
     assert window.shortcut_f11 is not None
 
+    # Check multi-source checkboxes
+    assert window.cb_claude is not None
+    assert window.cb_antigravity is not None
+    assert window.cb_copilot is not None
+    assert window.cb_ollama is not None
+    assert window.cb_claude_code is not None
+    assert not window.btn_export_skill.isEnabled()
+
 
 def test_main_window_toggle_fullscreen(qapp):
     window = MainWindow()
@@ -80,7 +88,7 @@ def test_main_window_apply_filter(qapp):
     assert window.table.item(0, 0).text() == "read_resource"
 
 
-def test_main_window_selection_detail(qapp):
+def test_main_window_selection_detail_and_skill_button(qapp):
     window = MainWindow()
 
     entry = AuditEntry(
@@ -97,8 +105,12 @@ def test_main_window_selection_detail(qapp):
     window.apply_filter()
 
     assert window.table.rowCount() == 1
+    assert not window.btn_export_skill.isEnabled()
+
     window.table.selectRow(0)
 
     assert "git status" in window.lbl_detail_title.text()
     assert "notes.md:L5" in window.detail_text.toPlainText()
     assert "run.md:L8" in window.detail_text.toPlainText()
+    assert window.btn_export_skill.isEnabled()
+    assert window.selected_entry == entry

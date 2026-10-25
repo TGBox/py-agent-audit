@@ -1,5 +1,6 @@
 """PySide6 graphical user interface for the AI Agent Audit application."""
 
+import re
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QThread, Signal
@@ -27,7 +28,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.scanner import AuditEntry, get_default_search_paths, scan_sources
+from src.scanner import (
+    AuditEntry,
+    generate_skill_markdown,
+    get_default_search_paths,
+    scan_sources,
+)
 
 DARK_STYLESHEET = """
 QMainWindow, QWidget {
@@ -84,6 +90,17 @@ QPushButton#primaryBtn:hover {
 QPushButton#primaryBtn:disabled {
     background-color: #45475a;
     color: #7f849c;
+}
+
+QPushButton#actionBtn {
+    background-color: #a6e3a1;
+    color: #11111b;
+    font-weight: bold;
+    border: none;
+}
+
+QPushButton#actionBtn:hover {
+    background-color: #94e2d5;
 }
 
 QLineEdit, QComboBox {
@@ -193,12 +210,13 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("py-agent-audit — KI-Agenten Workflow-Analyse")
-        self.setMinimumSize(950, 650)
+        self.setWindowTitle("py-agent-audit — Multi-Source Agent Audit & Skill Generator")
+        self.setMinimumSize(1000, 680)
 
         self.entries: list[AuditEntry] = []
         self.worker: ScanWorker | None = None
         self.custom_paths: list[Path] = []
+        self.selected_entry: AuditEntry | None = None
 
         self.init_ui()
         self.load_settings()
@@ -212,30 +230,41 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(10)
 
         # 1. Source configuration box
-        sources_group = QGroupBox("Datenquellen & Agenten-Pfade")
+        sources_group = QGroupBox("Erkannte KI-Quellen & Agenten-Pfade")
         sources_layout = QHBoxLayout(sources_group)
 
         default_paths = get_default_search_paths()
         has_claude = bool(default_paths.get("Claude Desktop"))
         has_ag = bool(default_paths.get("Antigravity"))
+        has_copilot = bool(default_paths.get("GitHub Copilot"))
+        has_ollama = bool(default_paths.get("Ollama"))
+        has_claude_code = bool(default_paths.get("Claude Code"))
 
-        self.cb_claude = QCheckBox(
-            f"Claude Desktop Logs ({'Gefunden' if has_claude else 'Standard'})"
-        )
+        self.cb_claude = QCheckBox(f"Claude Desktop ({'✓' if has_claude else '–'})")
         self.cb_claude.setChecked(has_claude)
         sources_layout.addWidget(self.cb_claude)
 
-        self.cb_antigravity = QCheckBox(
-            f"Antigravity / Gemini Artefakte ({'Gefunden' if has_ag else 'Standard'})"
-        )
+        self.cb_antigravity = QCheckBox(f"Antigravity ({'✓' if has_ag else '–'})")
         self.cb_antigravity.setChecked(has_ag)
         sources_layout.addWidget(self.cb_antigravity)
 
-        self.btn_add_folder = QPushButton("Workspace-Ordner hinzufügen...")
+        self.cb_copilot = QCheckBox(f"GitHub Copilot ({'✓' if has_copilot else '–'})")
+        self.cb_copilot.setChecked(has_copilot)
+        sources_layout.addWidget(self.cb_copilot)
+
+        self.cb_ollama = QCheckBox(f"Ollama ({'✓' if has_ollama else '–'})")
+        self.cb_ollama.setChecked(has_ollama)
+        sources_layout.addWidget(self.cb_ollama)
+
+        self.cb_claude_code = QCheckBox(f"Claude Code ({'✓' if has_claude_code else '–'})")
+        self.cb_claude_code.setChecked(has_claude_code)
+        sources_layout.addWidget(self.cb_claude_code)
+
+        self.btn_add_folder = QPushButton("Workspace-Ordner...")
         self.btn_add_folder.clicked.connect(self.add_custom_folder)
         sources_layout.addWidget(self.btn_add_folder)
 
-        self.lbl_custom_count = QLabel("0 eigene Ordner")
+        self.lbl_custom_count = QLabel("0 Ordner")
         self.lbl_custom_count.setStyleSheet("color: #a6adc8;")
         sources_layout.addWidget(self.lbl_custom_count)
 
@@ -257,17 +286,29 @@ class MainWindow(QMainWindow):
         # 3. Filter bar
         filter_layout = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Befehl oder Tool filtern...")
+        self.search_input.setPlaceholderText("Befehl, Tool oder Endpunkt filtern...")
         self.search_input.textChanged.connect(self.apply_filter)
         filter_layout.addWidget(self.search_input, stretch=3)
 
         self.combo_kind = QComboBox()
-        self.combo_kind.addItems(["Alle Typen", "CLI Command", "MCP Tool", "Internal Tool"])
+        self.combo_kind.addItems(
+            ["Alle Typen", "CLI Command", "MCP Tool", "Internal Tool", "LLM Endpoint"]
+        )
         self.combo_kind.currentTextChanged.connect(self.apply_filter)
         filter_layout.addWidget(self.combo_kind, stretch=1)
 
         self.combo_provider = QComboBox()
-        self.combo_provider.addItems(["Alle Quellen", "Claude Desktop", "Antigravity", "Workspace"])
+        self.combo_provider.addItems(
+            [
+                "Alle Quellen",
+                "Claude Desktop",
+                "Antigravity",
+                "GitHub Copilot",
+                "Ollama",
+                "Claude Code",
+                "Workspace",
+            ]
+        )
         self.combo_provider.currentTextChanged.connect(self.apply_filter)
         filter_layout.addWidget(self.combo_provider, stretch=1)
 
@@ -300,9 +341,19 @@ class MainWindow(QMainWindow):
         detail_layout = QVBoxLayout(detail_frame)
         detail_layout.setContentsMargins(6, 0, 0, 0)
 
+        header_detail_layout = QHBoxLayout()
         self.lbl_detail_title = QLabel("Kontext-Inspektion")
         self.lbl_detail_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #89b4fa;")
-        detail_layout.addWidget(self.lbl_detail_title)
+        header_detail_layout.addWidget(self.lbl_detail_title)
+        header_detail_layout.addStretch()
+
+        self.btn_export_skill = QPushButton("Als Skill exportieren (SKILL.md)...")
+        self.btn_export_skill.setObjectName("actionBtn")
+        self.btn_export_skill.setEnabled(False)
+        self.btn_export_skill.clicked.connect(self.export_selected_as_skill)
+        header_detail_layout.addWidget(self.btn_export_skill)
+
+        detail_layout.addLayout(header_detail_layout)
 
         self.lbl_detail_subtitle = QLabel("Wähle einen Eintrag in der Tabelle aus.")
         self.lbl_detail_subtitle.setStyleSheet("color: #a6adc8; margin-bottom: 6px;")
@@ -327,7 +378,6 @@ class MainWindow(QMainWindow):
         self.shortcut_f11 = QShortcut(QKeySequence("F11"), self)
         self.shortcut_f11.activated.connect(self.toggle_fullscreen)
 
-        # Add fullscreen action to menu or window
         fullscreen_action = QAction("Vollbild umschalten (F11)", self)
         fullscreen_action.setShortcut(QKeySequence("F11"))
         fullscreen_action.triggered.connect(self.toggle_fullscreen)
@@ -373,6 +423,18 @@ class MainWindow(QMainWindow):
             for p in default_paths.get("Antigravity", []):
                 sources.append((p, "Antigravity"))
 
+        if self.cb_copilot.isChecked():
+            for p in default_paths.get("GitHub Copilot", []):
+                sources.append((p, "GitHub Copilot"))
+
+        if self.cb_ollama.isChecked():
+            for p in default_paths.get("Ollama", []):
+                sources.append((p, "Ollama"))
+
+        if self.cb_claude_code.isChecked():
+            for p in default_paths.get("Claude Code", []):
+                sources.append((p, "Claude Code"))
+
         for p in self.custom_paths:
             sources.append((p, "Workspace"))
 
@@ -408,7 +470,7 @@ class MainWindow(QMainWindow):
         self.apply_filter()
         total_calls = sum(e.count for e in results)
         self.status_label.setText(
-            f"Scan abgeschlossen: {len(results)} eindeutige Aktionen ({total_calls} Aufrufe insgesamt) gefunden."
+            f"Scan abgeschlossen: {len(results)} Aktionen ({total_calls} Aufrufe) gefunden."
         )
 
     def on_scan_failed(self, error_msg: str) -> None:
@@ -442,11 +504,9 @@ class MainWindow(QMainWindow):
             item_kind = QTableWidgetItem(entry.kind)
             item_provider = QTableWidgetItem(entry.provider)
 
-            # Integer sorting for count column
             item_count = QTableWidgetItem()
             item_count.setData(Qt.ItemDataRole.DisplayRole, entry.count)
 
-            # Store the entry reference on row item
             item_name.setData(Qt.ItemDataRole.UserRole, entry)
 
             self.table.setItem(row_idx, 0, item_name)
@@ -460,6 +520,8 @@ class MainWindow(QMainWindow):
         """Update the detail panel when a row is selected."""
         selected_items = self.table.selectedItems()
         if not selected_items:
+            self.selected_entry = None
+            self.btn_export_skill.setEnabled(False)
             self.lbl_detail_title.setText("Kontext-Inspektion")
             self.lbl_detail_subtitle.setText("Wähle einen Eintrag in der Tabelle aus.")
             self.detail_text.clear()
@@ -469,6 +531,9 @@ class MainWindow(QMainWindow):
         item_name = self.table.item(row, 0)
         entry: AuditEntry | None = item_name.data(Qt.ItemDataRole.UserRole) if item_name else None
 
+        self.selected_entry = entry
+        self.btn_export_skill.setEnabled(entry is not None)
+
         if not entry:
             return
 
@@ -477,7 +542,6 @@ class MainWindow(QMainWindow):
             f"Typ: {entry.kind} | Quelle: {entry.provider} | {entry.count} Aufrufe insgesamt"
         )
 
-        # Build context view
         lines: list[str] = [
             f"=== Fundstellen für '{entry.name}' ({len(entry.findings)} Vorkommnisse) ===\n"
         ]
@@ -493,6 +557,34 @@ class MainWindow(QMainWindow):
             lines.append(f"... und {len(entry.findings) - 50} weitere Fundstellen.")
 
         self.detail_text.setPlainText("\n".join(lines))
+
+    def export_selected_as_skill(self) -> None:
+        """Export the currently selected audit entry as a structured SKILL.md file."""
+        if not self.selected_entry:
+            return
+
+        slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", self.selected_entry.name.lower()).strip("-")
+        default_dir = Path(".agents") / "skills" / slug if Path(".agents").exists() else Path.cwd()
+        default_file = default_dir / "SKILL.md"
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Skill-Datei speichern",
+            str(default_file),
+            "Markdown-Dateien (*.md);;Alle Dateien (*.*)",
+        )
+        if save_path:
+            target_path = Path(save_path)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            content = generate_skill_markdown(self.selected_entry)
+            target_path.write_text(content, encoding="utf-8")
+
+            self.status_label.setText(f"Skill gespeichert: {target_path}")
+            QMessageBox.information(
+                self,
+                "Skill exportiert",
+                f"Der Workflow für '{self.selected_entry.name}' wurde erfolgreich exportiert nach:\n\n{target_path}",
+            )
 
     def load_settings(self) -> None:
         """Load persisted window geometry and state from QSettings."""
