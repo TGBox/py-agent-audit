@@ -195,4 +195,3 @@
 
 - [x] All polyglot tests pass: `uv run pytest tests/test_server.py`
 - [x] Ruff lint & formatting clean: `uv run ruff check .`
-
