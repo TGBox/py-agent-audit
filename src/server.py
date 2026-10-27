@@ -7,7 +7,9 @@ project tree mapping, and bottleneck logging.
 
 import ast
 import json
+import os
 import re
+import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +23,33 @@ except (ImportError, ModuleNotFoundError):
 mcp = FastMCP("TokenOptimizer")
 
 BOTTLENECK_LOG = Path.home() / ".mcp_bottlenecks.jsonl"
+
+CHECK_TIMEOUT_SECONDS = 300
+EXIT_NOT_FOUND = 127
+EXIT_TIMEOUT = 124
+PYTEST_NO_TESTS_COLLECTED = 5
+MAX_SECTION_CHARS = 1500
+
+# Lockfiles and generated assets excluded from compact diffs. Exact names instead of
+# "*lock*", which also matched source files like "blocker.py" or "clock.rs".
+DIFF_EXCLUDES = [
+    "Cargo.lock",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "bun.lockb",
+    "uv.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "composer.lock",
+    "Gemfile.lock",
+    "packages.lock.json",
+    "*.svg",
+    "*.min.js",
+    "*.min.css",
+    "*.map",
+]
 
 IGNORE_DIRS = {
     ".git",
@@ -80,20 +109,94 @@ def detect_project_ecosystems(cwd: Path) -> list[str]:
     return ecosystems
 
 
-def run_command_safely(cmd: list[str], cwd: Path) -> tuple[int, str]:
-    """Execute a subprocess command, returning returncode and combined output."""
+def _clean_subprocess_env() -> dict[str, str]:
+    """Return an environment for child processes without this server's own virtualenv.
+
+    The server itself runs via ``uv run`` inside the py-agent-audit venv. Without cleanup,
+    ``pytest``/``ruff`` of *this* venv would be used for the target project.
+    """
+    env = dict(os.environ)
+    own_venv = env.pop("VIRTUAL_ENV", None)
+    if own_venv:
+        own_bins = {os.path.normcase(str(Path(own_venv) / sub)) for sub in ("bin", "Scripts")}
+        env["PATH"] = os.pathsep.join(
+            p for p in env.get("PATH", "").split(os.pathsep) if os.path.normcase(p) not in own_bins
+        )
+    # Non-interactive mode: prevents watch modes (vitest/jest) and colour codes.
+    env["CI"] = "1"
+    env.setdefault("NO_COLOR", "1")
+    return env
+
+
+def run_command_safely(
+    cmd: list[str],
+    cwd: Path,
+    timeout: int = CHECK_TIMEOUT_SECONDS,
+    stdout_only: bool = False,
+) -> tuple[int, str]:
+    """Execute a subprocess command, returning returncode and combined output.
+
+    With ``stdout_only`` the raw, unstripped stdout is returned on success (stderr is
+    only returned on failure). stdin is detached: the MCP server talks JSON-RPC over its
+    own stdin, a child process must never read from it.
+    """
     try:
         proc = subprocess.run(
             cmd,
             cwd=cwd,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_clean_subprocess_env(),
+            timeout=timeout,
             check=False,
         )
+        if stdout_only and proc.returncode == 0:
+            return proc.returncode, proc.stdout
         output = (proc.stdout + "\n" + proc.stderr).strip()
         return proc.returncode, output
     except FileNotFoundError:
-        return 127, f"Executable '{cmd[0]}' not found in PATH."
+        return EXIT_NOT_FOUND, f"Executable '{cmd[0]}' not found in PATH."
+    except subprocess.TimeoutExpired:
+        return EXIT_TIMEOUT, f"'{' '.join(cmd)}' aborted after {timeout}s (timeout)."
+
+
+def _is_tool_missing(code: int, output: str, tool: str) -> bool:
+    """True if a command could not start because the tool itself is not installed."""
+    if code == EXIT_NOT_FOUND:
+        return True
+    if code == 0:
+        return False
+    # `uv run <tool>` prints "Failed to spawn: `<tool>`"; `python -m <tool>` prints
+    # "No module named <tool>" (exact module, so ImportErrors inside tests don't match).
+    return (
+        f"Failed to spawn: `{tool}`" in output
+        or re.search(rf"No module named '?{re.escape(tool)}'?\s*$", output, re.MULTILINE)
+        is not None
+    )
+
+
+def _python_runner(cwd: Path) -> list[str]:
+    """Return the command prefix used to run Python tools inside the target project."""
+    if (cwd / "uv.lock").is_file() and shutil.which("uv"):
+        return ["uv", "run"]
+    for venv_name in (".venv", "venv"):
+        for python in (
+            cwd / venv_name / "Scripts" / "python.exe",
+            cwd / venv_name / "bin" / "python",
+        ):
+            if python.is_file():
+                return [str(python), "-m"]
+    return ["python", "-m"]
+
+
+def _tail(text: str, limit: int) -> str:
+    """Keep the end of a long output; summaries of test runners are at the bottom."""
+    if len(text) <= limit:
+        return text
+    return "...[truncated]\n" + text[-limit:]
 
 
 @mcp.tool()
@@ -114,52 +217,59 @@ def run_compact_checks(project_dir: str) -> str:
         ecosystems = ["python"]
 
     errors: list[str] = []
-    checked_systems: list[str] = []
+    skipped: list[str] = []
+    passed: list[str] = []
+
+    def check(label: str, cmd: list[str], tool: str, ok_codes: tuple[int, ...] = (0,)) -> None:
+        code, out = run_command_safely(cmd, cwd)
+        if code in ok_codes:
+            passed.append(label)
+        elif _is_tool_missing(code, out, tool):
+            # Never report a check as passed that did not run at all.
+            skipped.append(f"{label}: '{tool}' not available ({' '.join(cmd)})")
+        elif code == EXIT_TIMEOUT:
+            errors.append(f"--- {label.upper()} TIMEOUT ---\n{out}")
+        else:
+            errors.append(f"--- {label.upper()} ERRORS ---\n{_tail(out, MAX_SECTION_CHARS)}")
 
     # 1. Rust ecosystem
     if "rust" in ecosystems:
-        checked_systems.append("Rust (cargo)")
-        code, out = run_command_safely(["cargo", "check", "--message-format=short"], cwd)
-        if code != 0:
-            errors.append(f"--- CARGO CHECK ERRORS ---\n{out}")
-
-        code, out = run_command_safely(["cargo", "test", "-q"], cwd)
-        if code != 0:
-            errors.append(f"--- CARGO TEST ERRORS ---\n{out}")
+        check("cargo check", ["cargo", "check", "--message-format=short"], "cargo")
+        check("cargo test", ["cargo", "test", "-q"], "cargo")
 
     # 2. Node / TypeScript ecosystem
     if "node" in ecosystems:
-        checked_systems.append("Node / TypeScript (npm)")
-        code, out = run_command_safely(["npm", "test", "--silent"], cwd)
-        if code != 0:
-            errors.append(f"--- NPM TEST ERRORS ---\n{out}")
+        check("npm test", ["npm", "test", "--silent"], "npm")
 
     # 3. .NET / C# ecosystem
     if "dotnet" in ecosystems:
-        checked_systems.append(".NET / C# (dotnet)")
-        code, out = run_command_safely(["dotnet", "test", "-v", "q", "--nologo"], cwd)
-        if code != 0:
-            errors.append(f"--- DOTNET TEST ERRORS ---\n{out}")
+        check("dotnet test", ["dotnet", "test", "-v", "q", "--nologo"], "dotnet")
 
-    # 4. Python ecosystem
+    # 4. Python ecosystem (run inside the target project's environment)
     if "python" in ecosystems:
-        checked_systems.append("Python (ruff & pytest)")
-        code, out = run_command_safely(["ruff", "check", "--output-format=concise", "."], cwd)
-        if code != 0 and code != 127:
-            errors.append(f"--- RUFF ERRORS ---\n{out}")
+        runner = _python_runner(cwd)
+        check("ruff", [*runner, "ruff", "check", "--output-format=concise", "."], "ruff")
+        check(
+            "pytest",
+            [*runner, "pytest", "-q", "--tb=short", "--no-header"],
+            "pytest",
+            ok_codes=(0, PYTEST_NO_TESTS_COLLECTED),
+        )
 
-        code, out = run_command_safely(["pytest", "-q", "--tb=short", "--no-header"], cwd)
-        if code != 0 and code != 127:
-            errors.append(f"--- PYTEST ERRORS ---\n{out}")
+    sections: list[str] = []
+    if errors:
+        sections.append("FAILED")
+        sections.extend(errors)
+    if skipped:
+        sections.append("--- NOT RUN ---\n" + "\n".join(f"- {s}" for s in skipped))
+    if passed:
+        sections.append("Passed: " + ", ".join(passed))
 
+    if not errors and not skipped:
+        return f"OK: All checks passed cleanly [{', '.join(passed)}]."
     if not errors:
-        systems_str = ", ".join(checked_systems)
-        return f"OK: All checks passed cleanly for [{systems_str}]."
-
-    combined = "\n\n".join(errors)
-    if len(combined) > 3000:
-        return combined[:3000] + "\n...[truncated]"
-    return combined
+        return "INCOMPLETE: no failures, but some checks could not run.\n\n" + "\n\n".join(sections)
+    return "\n\n".join(sections)
 
 
 def extract_rust_signatures(content: str) -> list[str]:
@@ -274,19 +384,22 @@ def get_compact_git_diff(project_dir: str, staged_only: bool = False) -> str:
     Excludes lockfiles, assets, and minified bundles across all languages.
     """
     cwd = Path(project_dir)
-    if not (cwd / ".git").exists():
+    if not cwd.is_dir():
         return f"Error: No git repository found in '{project_dir}'."
 
-    try:
-        status = subprocess.run(
-            ["git", "status", "--short"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout.strip()
-    except FileNotFoundError:
+    # rev-parse also works from subdirectories and in worktrees (where .git is a file).
+    code, out = run_command_safely(["git", "rev-parse", "--is-inside-work-tree"], cwd)
+    if code == EXIT_NOT_FOUND:
         return "Error: Git executable not found in PATH."
+    if code != 0 or out.strip() != "true":
+        return f"Error: No git repository found in '{project_dir}'."
+
+    code, status_out = run_command_safely(["git", "status", "--short"], cwd, stdout_only=True)
+    if code != 0:
+        return f"Error running git status: {status_out}"
+    # Only strip trailing whitespace: the leading space of " M file" carries meaning
+    # (unstaged vs. staged "M  file").
+    status = status_out.rstrip()
 
     if not status and not staged_only:
         return "Working tree is clean (no changes)."
@@ -294,25 +407,14 @@ def get_compact_git_diff(project_dir: str, staged_only: bool = False) -> str:
     diff_cmd = ["git", "diff", "--unified=0", "--no-color"]
     if staged_only:
         diff_cmd.append("--staged")
-    diff_cmd.extend(
-        [
-            "--",
-            ".",
-            ":(exclude)*lock*",
-            ":(exclude)*.svg",
-            ":(exclude)*.min.*",
-        ]
-    )
+    diff_cmd.extend(["--", "."])
+    diff_cmd.extend(f":(glob,exclude)**/{pattern}" for pattern in DIFF_EXCLUDES)
 
-    diff = subprocess.run(
-        diff_cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        check=False,
-    ).stdout.strip()
+    code, diff = run_command_safely(diff_cmd, cwd, stdout_only=True)
+    if code != 0:
+        return f"Error running git diff: {diff}"
 
-    output = f"=== STATUS ===\n{status}\n\n=== COMPACT DIFF (U=0) ===\n{diff}"
+    output = f"=== STATUS ===\n{status}\n\n=== COMPACT DIFF (U=0) ===\n{diff.strip()}"
     if len(output) > 4000:
         return output[:4000] + "\n...[Diff truncated]"
     return output

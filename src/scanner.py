@@ -3,8 +3,9 @@
 import json
 import os
 import re
+import zipfile
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,19 @@ ANTIGRAVITY_TOOL_PATTERN = re.compile(
     r"grep_search|find_by_name|list_dir|write_to_file|ask_question|browser_subagent)\b"
 )
 OLLAMA_API_PATTERN = re.compile(r'(?:POST|GET)\s+"(/api/[^"]+)"')
+# Separators between chained shell commands ("a && b", "a; b", "a || b", "a | b")
+SHELL_CHAIN_PATTERN = re.compile(r"\s*(?:&&|\|\||;|\|)\s*")
+
+CancelCheck = Callable[[], bool]
+
+
+class ScanCancelled(Exception):
+    """Raised when a running scan was cancelled by the user."""
+
+
+def _check_cancel(should_cancel: CancelCheck | None) -> None:
+    if should_cancel is not None and should_cancel():
+        raise ScanCancelled
 
 
 @dataclass(slots=True)
@@ -72,11 +86,65 @@ def extract_strings_from_json(data: Any) -> list[str]:
     return strings
 
 
+def _env_path(name: str, default: Path | None = None) -> Path | None:
+    """Return an environment variable as Path, or default if unset/empty.
+
+    Path("") would silently resolve relative to the CWD, so empty values are rejected.
+    """
+    value = os.environ.get(name, "").strip()
+    return Path(value) if value else default
+
+
+def get_claude_desktop_data_dirs() -> list[Path]:
+    """Return existing Claude Desktop data directories, most specific first.
+
+    The Microsoft Store / MSIX build of Claude Desktop does not write to %APPDATA%\\Claude.
+    Windows redirects its AppData writes into the package folder:
+    %LOCALAPPDATA%\\Packages\\Claude_<publisher-id>\\LocalCache\\Roaming\\Claude
+    Other processes (like this scanner) still see the real, often empty %APPDATA%\\Claude.
+    """
+    candidates: list[Path] = []
+    localappdata = _env_path("LOCALAPPDATA")
+    if localappdata is not None:
+        packages = localappdata / "Packages"
+        if packages.is_dir():
+            for package in sorted(packages.glob("Claude_*")):
+                candidates.append(package / "LocalCache" / "Roaming" / "Claude")
+    appdata = _env_path("APPDATA")
+    if appdata is not None:
+        candidates.append(appdata / "Claude")
+
+    result: list[Path] = []
+    for candidate in candidates:
+        if candidate.is_dir() and candidate not in result:
+            result.append(candidate)
+    return result
+
+
+def get_claude_code_dirs() -> list[Path]:
+    """Return existing Claude Code config directories (CLAUDE_CONFIG_DIR, then ~/.claude)."""
+    candidates = [
+        p
+        for p in (
+            _env_path("CLAUDE_CONFIG_DIR"),
+            _env_path("USERPROFILE", Path.home()) / ".claude",
+            Path.home() / ".claude",
+        )
+        if p is not None
+    ]
+    result: list[Path] = []
+    for candidate in candidates:
+        if candidate.is_dir() and candidate not in result:
+            result.append(candidate)
+    return result
+
+
 def get_default_search_paths() -> dict[str, list[Path]]:
     """Return default search directories per provider based on OS environment."""
-    appdata = Path(os.environ.get("APPDATA", ""))
-    localappdata = Path(os.environ.get("LOCALAPPDATA", ""))
-    userprofile = Path(os.environ.get("USERPROFILE", Path.home()))
+    home = Path.home()
+    appdata = _env_path("APPDATA", home / "AppData" / "Roaming")
+    localappdata = _env_path("LOCALAPPDATA", home / "AppData" / "Local")
+    userprofile = _env_path("USERPROFILE", home)
 
     paths: dict[str, list[Path]] = {
         "Claude Desktop": [],
@@ -86,10 +154,11 @@ def get_default_search_paths() -> dict[str, list[Path]]:
         "Claude Code": [],
     }
 
-    # Claude Desktop
-    claude_log_dir = appdata / "Claude" / "logs"
-    if claude_log_dir.exists():
-        paths["Claude Desktop"].append(claude_log_dir)
+    # Claude Desktop (regular installer and Microsoft Store / MSIX build)
+    for data_dir in get_claude_desktop_data_dirs():
+        claude_log_dir = data_dir / "logs"
+        if claude_log_dir.is_dir():
+            paths["Claude Desktop"].append(claude_log_dir)
 
     # Antigravity / Gemini
     ag_candidates = [
@@ -116,9 +185,7 @@ def get_default_search_paths() -> dict[str, list[Path]]:
         paths["Ollama"].append(ollama_log.parent)
 
     # Claude Code CLI
-    claude_code_dir = userprofile / ".claude"
-    if claude_code_dir.exists():
-        paths["Claude Code"].append(claude_code_dir)
+    paths["Claude Code"].extend(get_claude_code_dirs())
 
     # TokenOptimizer Bottlenecks
     bottleneck_log = userprofile / ".mcp_bottlenecks.jsonl"
@@ -156,13 +223,18 @@ def scan_claude_logs(log_dir: Path) -> list[Finding]:
     return findings
 
 
-def scan_markdown_artifacts(base_dir: Path, provider: str = "Workspace") -> list[Finding]:
+def scan_markdown_artifacts(
+    base_dir: Path,
+    provider: str = "Workspace",
+    should_cancel: CancelCheck | None = None,
+) -> list[Finding]:
     """Scan markdown files for shell commands inside code blocks."""
     findings: list[Finding] = []
     if not base_dir.exists():
         return findings
 
     for md_file in base_dir.rglob("*.md"):
+        _check_cancel(should_cancel)
         try:
             content = md_file.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -185,7 +257,11 @@ def scan_markdown_artifacts(base_dir: Path, provider: str = "Workspace") -> list
     return findings
 
 
-def scan_tool_logs(base_dir: Path, provider: str = "Antigravity") -> list[Finding]:
+def scan_tool_logs(
+    base_dir: Path,
+    provider: str = "Antigravity",
+    should_cancel: CancelCheck | None = None,
+) -> list[Finding]:
     """Scan log and json/jsonl files for internal tool invocations."""
     findings: list[Finding] = []
     if not base_dir.exists():
@@ -196,6 +272,7 @@ def scan_tool_logs(base_dir: Path, provider: str = "Antigravity") -> list[Findin
         target_files.extend(base_dir.rglob(ext))
 
     for file_path in target_files:
+        _check_cancel(should_cancel)
         try:
             content = file_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -281,14 +358,193 @@ def scan_ollama_logs(base_dir: Path) -> list[Finding]:
     return findings
 
 
-def scan_claude_code(base_dir: Path) -> list[Finding]:
-    """Scan Claude Code CLI directory for skills, markdown and JSON logs."""
+def split_shell_commands(command: str) -> list[str]:
+    """Split a (possibly multi-line or chained) shell command into single commands."""
+    parts: list[str] = []
+    for line in command.splitlines():
+        parts.extend(p for p in SHELL_CHAIN_PATTERN.split(line) if p.strip())
+    return parts
+
+
+def _tool_use_blocks(record: Any) -> list[dict[str, Any]]:
+    """Return all tool_use blocks of one Claude Code transcript record."""
+    if not isinstance(record, dict):
+        return []
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return []
+    return [
+        block
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name")
+    ]
+
+
+def scan_claude_code_sessions(
+    base_dir: Path, should_cancel: CancelCheck | None = None
+) -> list[Finding]:
+    """Scan Claude Code session transcripts (~/.claude/projects/**/*.jsonl) for tool calls.
+
+    Every ``tool_use`` block becomes a finding: ``Bash`` commands are split into single
+    shell commands (kind ``CLI Command``), ``mcp__*`` tools are ``MCP Tool`` and all other
+    built-in tools (Read, Edit, Grep, ...) are ``Internal Tool``.
+    """
     findings: list[Finding] = []
-    if not base_dir.exists():
+    projects_dir = base_dir / "projects"
+    search_root = projects_dir if projects_dir.is_dir() else base_dir
+    if not search_root.exists():
         return findings
 
-    findings.extend(scan_markdown_artifacts(base_dir, provider="Claude Code"))
-    findings.extend(scan_tool_logs(base_dir, provider="Claude Code"))
+    for file_path in search_root.rglob("*.jsonl"):
+        _check_cancel(should_cancel)
+        try:
+            handle = file_path.open(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for line_idx, line in enumerate(handle, start=1):
+                if '"tool_use"' not in line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                for block in _tool_use_blocks(record):
+                    findings.extend(_findings_from_tool_use(block, file_path, line_idx))
+    return findings
+
+
+# Tool names whose "command" input is a shell command line
+SHELL_TOOL_NAMES = {"Bash", "bash", "bash_tool", "PowerShell", "powershell", "run_command"}
+
+
+def _findings_from_tool_use(
+    block: dict[str, Any],
+    file_path: Path,
+    line_idx: int | None,
+    provider: str = "Claude Code",
+    context_prefix: str = "",
+) -> list[Finding]:
+    tool_name = str(block["name"])
+    tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
+
+    if tool_name in SHELL_TOOL_NAMES and isinstance(tool_input.get("command"), str):
+        result: list[Finding] = []
+        for command in split_shell_commands(tool_input["command"]):
+            cmd_key = extract_command_key(command)
+            if cmd_key:
+                result.append(
+                    Finding(
+                        name=cmd_key,
+                        kind="CLI Command",
+                        provider=provider,
+                        file_path=file_path,
+                        line_number=line_idx,
+                        context=(context_prefix + command.strip())[:200],
+                    )
+                )
+        return result
+
+    kind = "MCP Tool" if tool_name.startswith("mcp__") else "Internal Tool"
+    context = context_prefix + json.dumps(tool_input, ensure_ascii=False)
+    return [
+        Finding(
+            name=tool_name,
+            kind=kind,
+            provider=provider,
+            file_path=file_path,
+            line_number=line_idx,
+            context=context[:200],
+        )
+    ]
+
+
+def scan_claude_code(base_dir: Path, should_cancel: CancelCheck | None = None) -> list[Finding]:
+    """Scan the Claude Code CLI directory (~/.claude) for executed tool calls.
+
+    Only real session transcripts are evaluated. Markdown files below ~/.claude (skills,
+    plugin docs) merely mention commands and are therefore not counted.
+    """
+    if not base_dir.exists():
+        return []
+    return scan_claude_code_sessions(base_dir, should_cancel=should_cancel)
+
+
+def _iter_export_documents(
+    path: Path, should_cancel: CancelCheck | None = None
+) -> Iterator[tuple[Path, Any]]:
+    """Yield (file, parsed JSON) for a claude.ai export: ZIP, JSON file or extracted folder."""
+    if path.is_dir():
+        for json_file in sorted(path.rglob("*.json")):
+            _check_cancel(should_cancel)
+            try:
+                yield json_file, json.loads(json_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+    elif path.suffix.lower() == ".zip":
+        try:
+            archive = zipfile.ZipFile(path)
+        except (OSError, zipfile.BadZipFile):
+            return
+        with archive:
+            for member in archive.namelist():
+                _check_cancel(should_cancel)
+                if not member.lower().endswith(".json"):
+                    continue
+                try:
+                    data = json.loads(archive.read(member).decode("utf-8"))
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError, KeyError):
+                    continue
+                yield path / member, data
+    elif path.suffix.lower() == ".json":
+        try:
+            yield path, json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+
+def _walk_tool_uses(data: Any, conversation: str = "") -> Iterator[tuple[dict[str, Any], str]]:
+    """Recursively yield (tool_use block, conversation title) from arbitrary JSON.
+
+    The export format is not documented, so instead of relying on a fixed schema every
+    nested ``{"type": "tool_use", "name": ...}`` object is collected.
+    """
+    stack: list[tuple[Any, str]] = [(data, conversation)]
+    while stack:
+        node, title = stack.pop()
+        if isinstance(node, dict):
+            if node.get("type") == "tool_use" and node.get("name"):
+                yield node, title
+                continue
+            # A conversation object carries its title next to its messages
+            if isinstance(node.get("name"), str) and any(
+                key in node for key in ("chat_messages", "messages")
+            ):
+                title = node["name"]
+            stack.extend((value, title) for value in reversed(list(node.values())))
+        elif isinstance(node, list):
+            stack.extend((item, title) for item in reversed(node))
+
+
+def scan_claude_export(path: Path, should_cancel: CancelCheck | None = None) -> list[Finding]:
+    """Scan a claude.ai data export (Settings > Privacy > Export data) for tool calls.
+
+    Accepts the downloaded ZIP, an extracted folder or a single JSON file such as
+    conversations.json. Chats in the Claude app are stored in the cloud, so this export
+    is the only local source for them.
+    """
+    findings: list[Finding] = []
+    if not path.exists():
+        return findings
+    for file_path, data in _iter_export_documents(path, should_cancel):
+        for block, title in _walk_tool_uses(data):
+            prefix = f"[{title}] " if title else ""
+            findings.extend(
+                _findings_from_tool_use(
+                    block, file_path, None, provider="Claude App", context_prefix=prefix
+                )
+            )
     return findings
 
 
@@ -349,12 +605,17 @@ def aggregate_findings(findings: list[Finding]) -> list[AuditEntry]:
 def scan_sources(
     sources: list[tuple[Path, str]],
     progress_callback: Callable[[int, int, str], None] | None = None,
+    should_cancel: CancelCheck | None = None,
 ) -> list[AuditEntry]:
-    """Scan multiple directory sources and aggregate the audit findings."""
+    """Scan multiple directory sources and aggregate the audit findings.
+
+    Raises ScanCancelled as soon as ``should_cancel`` returns True.
+    """
     all_findings: list[Finding] = []
     total = len(sources)
 
     for idx, (path, provider) in enumerate(sources, start=1):
+        _check_cancel(should_cancel)
         if progress_callback:
             progress_callback(idx, total, f"Scanning {provider}: {path.name}")
 
@@ -364,21 +625,32 @@ def scan_sources(
         if provider == "Claude Desktop":
             all_findings.extend(scan_claude_logs(path))
         elif provider == "Antigravity":
-            all_findings.extend(scan_markdown_artifacts(path, provider="Antigravity"))
-            all_findings.extend(scan_tool_logs(path, provider="Antigravity"))
+            all_findings.extend(
+                scan_markdown_artifacts(path, provider="Antigravity", should_cancel=should_cancel)
+            )
+            all_findings.extend(
+                scan_tool_logs(path, provider="Antigravity", should_cancel=should_cancel)
+            )
         elif provider == "GitHub Copilot":
             all_findings.extend(scan_copilot_sessions(path))
         elif provider == "Ollama":
             all_findings.extend(scan_ollama_logs(path))
         elif provider == "Claude Code":
-            all_findings.extend(scan_claude_code(path))
+            all_findings.extend(scan_claude_code(path, should_cancel=should_cancel))
+        elif provider == "Claude App":
+            all_findings.extend(scan_claude_export(path, should_cancel=should_cancel))
         elif provider == "TokenOptimizer":
             all_findings.extend(scan_bottleneck_logs(path))
         else:
             # Custom Workspace or generic directory
-            all_findings.extend(scan_markdown_artifacts(path, provider=provider))
-            all_findings.extend(scan_tool_logs(path, provider=provider))
+            all_findings.extend(
+                scan_markdown_artifacts(path, provider=provider, should_cancel=should_cancel)
+            )
+            all_findings.extend(
+                scan_tool_logs(path, provider=provider, should_cancel=should_cancel)
+            )
 
+    _check_cancel(should_cancel)
     return aggregate_findings(all_findings)
 
 
@@ -396,9 +668,16 @@ def generate_skill_markdown(entry: AuditEntry) -> str:
         "\n".join(sample_contexts) if sample_contexts else "- Keine Detailzeilen erfasst."
     )
 
+    # JSON strings are valid double-quoted YAML scalars, so ':' or quotes in the name
+    # (e.g. "Bottleneck: ...") can no longer break the frontmatter.
+    description = json.dumps(
+        f"Automates recurring '{entry.name}' workflow discovered by py-agent-audit.",
+        ensure_ascii=False,
+    )
+
     return f"""---
 name: {slug}
-description: Automates recurring '{entry.name}' workflow discovered by py-agent-audit.
+description: {description}
 ---
 
 # {entry.name} Workflow

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication
 # Ensure headless execution for tests
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-from src.gui import MainWindow
+from src.gui import MainWindow, ScanWorker
 from src.scanner import AuditEntry, Finding
 
 
@@ -128,3 +128,42 @@ def test_main_window_selection_detail_and_skill_button(qapp):
     assert "run.md:L8" in window.detail_text.toPlainText()
     assert window.btn_export_skill.isEnabled()
     assert window.selected_entry == entry
+
+
+def test_scan_worker_emits_cancelled_instead_of_results(qapp, tmp_path: Path):
+    (tmp_path / "plan.md").write_text("```sh\npytest -v\n```", encoding="utf-8")
+    worker = ScanWorker([(tmp_path, "Workspace")])
+    done: list = []
+    cancelled: list = []
+    worker.scan_done.connect(done.append)
+    worker.cancelled.connect(lambda: cancelled.append(True))
+
+    worker.cancel()
+    worker.run()  # run synchronously in the test thread
+
+    assert cancelled == [True]
+    assert done == []
+
+
+def test_cancel_does_not_block_and_resets_on_cancelled(qapp):
+    window = MainWindow()
+    window.on_scan_cancelled()
+    assert window.btn_scan.isEnabled()
+    assert window.btn_scan.text() == "Scan starten"
+    assert "abgebrochen" in window.status_label.text()
+
+
+def test_claude_export_source(qapp, tmp_path: Path):
+    window = MainWindow()
+    window.set_claude_export(None)
+    assert not window.cb_claude_app.isEnabled()
+
+    export_zip = tmp_path / "data.zip"
+    export_zip.write_bytes(b"")
+    window.set_claude_export(export_zip)
+    assert window.cb_claude_app.isEnabled()
+    assert window.cb_claude_app.isChecked()
+    assert "✓" in window.cb_claude_app.text()
+
+    window.set_claude_export(tmp_path / "missing.zip")
+    assert window.claude_export_path is None
