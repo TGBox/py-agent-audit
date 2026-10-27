@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 from src.mcp_installer import install_to_claude_desktop, is_installed_in_claude_desktop
 from src.scanner import (
     AuditEntry,
+    ScanCancelled,
     generate_skill_markdown,
     get_default_search_paths,
     scan_sources,
@@ -196,7 +197,9 @@ class ScanWorker(QThread):
     """Background worker thread for non-blocking log scanning."""
 
     progress = Signal(int, int, str)
-    finished = Signal(list)
+    # Named scan_done (not "finished") to avoid shadowing QThread's built-in finished signal.
+    scan_done = Signal(list)
+    cancelled = Signal()
     failed = Signal(str)
 
     def __init__(self, sources: list[tuple[Path, str]]) -> None:
@@ -207,6 +210,9 @@ class ScanWorker(QThread):
     def cancel(self) -> None:
         self._is_cancelled = True
 
+    def is_cancelled(self) -> bool:
+        return self._is_cancelled
+
     def run(self) -> None:
         try:
 
@@ -214,9 +220,12 @@ class ScanWorker(QThread):
                 if not self._is_cancelled:
                     self.progress.emit(current, total, msg)
 
-            results = scan_sources(self.sources, progress_callback=callback)
-            if not self._is_cancelled:
-                self.finished.emit(results)
+            results = scan_sources(
+                self.sources, progress_callback=callback, should_cancel=self.is_cancelled
+            )
+            self.scan_done.emit(results)
+        except ScanCancelled:
+            self.cancelled.emit()
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
 
@@ -490,10 +499,11 @@ class MainWindow(QMainWindow):
     def toggle_scan(self) -> None:
         """Start or cancel the asynchronous scan process."""
         if self.worker and self.worker.isRunning():
+            # Non-blocking: the worker stops at the next file and emits `cancelled`.
             self.worker.cancel()
-            self.worker.wait()
-            self.on_scan_finished([])
-            self.status_label.setText("Scan abgebrochen.")
+            self.btn_scan.setEnabled(False)
+            self.btn_scan.setText("Wird abgebrochen...")
+            self.status_label.setText("Scan wird abgebrochen...")
             return
 
         sources: list[tuple[Path, str]] = []
@@ -542,7 +552,8 @@ class MainWindow(QMainWindow):
 
         self.worker = ScanWorker(sources)
         self.worker.progress.connect(self.on_scan_progress)
-        self.worker.finished.connect(self.on_scan_finished)
+        self.worker.scan_done.connect(self.on_scan_finished)
+        self.worker.cancelled.connect(self.on_scan_cancelled)
         self.worker.failed.connect(self.on_scan_failed)
         self.worker.start()
 
@@ -552,6 +563,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(msg)
 
     def on_scan_finished(self, results: list[AuditEntry]) -> None:
+        self.btn_scan.setEnabled(True)
         self.btn_scan.setText("Scan starten")
         self.progress_bar.setVisible(False)
         self.entries = results
@@ -561,7 +573,14 @@ class MainWindow(QMainWindow):
             f"Scan abgeschlossen: {len(results)} Aktionen ({total_calls} Aufrufe) gefunden."
         )
 
+    def on_scan_cancelled(self) -> None:
+        self.btn_scan.setEnabled(True)
+        self.btn_scan.setText("Scan starten")
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("Scan abgebrochen.")
+
     def on_scan_failed(self, error_msg: str) -> None:
+        self.btn_scan.setEnabled(True)
         self.btn_scan.setText("Scan starten")
         self.progress_bar.setVisible(False)
         self.status_label.setText("Fehler beim Scan.")
@@ -685,6 +704,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Persist window geometry and settings on close."""
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait(5000)
         settings = QSettings("TGBox", "py-agent-audit")
         settings.setValue("geometry", self.saveGeometry())
         super().closeEvent(event)

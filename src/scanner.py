@@ -20,6 +20,19 @@ ANTIGRAVITY_TOOL_PATTERN = re.compile(
     r"grep_search|find_by_name|list_dir|write_to_file|ask_question|browser_subagent)\b"
 )
 OLLAMA_API_PATTERN = re.compile(r'(?:POST|GET)\s+"(/api/[^"]+)"')
+# Separators between chained shell commands ("a && b", "a; b", "a || b", "a | b")
+SHELL_CHAIN_PATTERN = re.compile(r"\s*(?:&&|\|\||;|\|)\s*")
+
+CancelCheck = Callable[[], bool]
+
+
+class ScanCancelled(Exception):
+    """Raised when a running scan was cancelled by the user."""
+
+
+def _check_cancel(should_cancel: CancelCheck | None) -> None:
+    if should_cancel is not None and should_cancel():
+        raise ScanCancelled
 
 
 @dataclass(slots=True)
@@ -156,13 +169,18 @@ def scan_claude_logs(log_dir: Path) -> list[Finding]:
     return findings
 
 
-def scan_markdown_artifacts(base_dir: Path, provider: str = "Workspace") -> list[Finding]:
+def scan_markdown_artifacts(
+    base_dir: Path,
+    provider: str = "Workspace",
+    should_cancel: CancelCheck | None = None,
+) -> list[Finding]:
     """Scan markdown files for shell commands inside code blocks."""
     findings: list[Finding] = []
     if not base_dir.exists():
         return findings
 
     for md_file in base_dir.rglob("*.md"):
+        _check_cancel(should_cancel)
         try:
             content = md_file.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -185,7 +203,11 @@ def scan_markdown_artifacts(base_dir: Path, provider: str = "Workspace") -> list
     return findings
 
 
-def scan_tool_logs(base_dir: Path, provider: str = "Antigravity") -> list[Finding]:
+def scan_tool_logs(
+    base_dir: Path,
+    provider: str = "Antigravity",
+    should_cancel: CancelCheck | None = None,
+) -> list[Finding]:
     """Scan log and json/jsonl files for internal tool invocations."""
     findings: list[Finding] = []
     if not base_dir.exists():
@@ -196,6 +218,7 @@ def scan_tool_logs(base_dir: Path, provider: str = "Antigravity") -> list[Findin
         target_files.extend(base_dir.rglob(ext))
 
     for file_path in target_files:
+        _check_cancel(should_cancel)
         try:
             content = file_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -281,15 +304,107 @@ def scan_ollama_logs(base_dir: Path) -> list[Finding]:
     return findings
 
 
-def scan_claude_code(base_dir: Path) -> list[Finding]:
-    """Scan Claude Code CLI directory for skills, markdown and JSON logs."""
+def split_shell_commands(command: str) -> list[str]:
+    """Split a (possibly multi-line or chained) shell command into single commands."""
+    parts: list[str] = []
+    for line in command.splitlines():
+        parts.extend(p for p in SHELL_CHAIN_PATTERN.split(line) if p.strip())
+    return parts
+
+
+def _tool_use_blocks(record: Any) -> list[dict[str, Any]]:
+    """Return all tool_use blocks of one Claude Code transcript record."""
+    if not isinstance(record, dict):
+        return []
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return []
+    return [
+        block
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name")
+    ]
+
+
+def scan_claude_code_sessions(
+    base_dir: Path, should_cancel: CancelCheck | None = None
+) -> list[Finding]:
+    """Scan Claude Code session transcripts (~/.claude/projects/**/*.jsonl) for tool calls.
+
+    Every ``tool_use`` block becomes a finding: ``Bash`` commands are split into single
+    shell commands (kind ``CLI Command``), ``mcp__*`` tools are ``MCP Tool`` and all other
+    built-in tools (Read, Edit, Grep, ...) are ``Internal Tool``.
+    """
     findings: list[Finding] = []
-    if not base_dir.exists():
+    projects_dir = base_dir / "projects"
+    search_root = projects_dir if projects_dir.is_dir() else base_dir
+    if not search_root.exists():
         return findings
 
-    findings.extend(scan_markdown_artifacts(base_dir, provider="Claude Code"))
-    findings.extend(scan_tool_logs(base_dir, provider="Claude Code"))
+    for file_path in search_root.rglob("*.jsonl"):
+        _check_cancel(should_cancel)
+        try:
+            handle = file_path.open(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for line_idx, line in enumerate(handle, start=1):
+                if '"tool_use"' not in line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                for block in _tool_use_blocks(record):
+                    findings.extend(_findings_from_tool_use(block, file_path, line_idx))
     return findings
+
+
+def _findings_from_tool_use(block: dict[str, Any], file_path: Path, line_idx: int) -> list[Finding]:
+    tool_name = str(block["name"])
+    tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
+
+    if tool_name == "Bash" and isinstance(tool_input.get("command"), str):
+        result: list[Finding] = []
+        for command in split_shell_commands(tool_input["command"]):
+            cmd_key = extract_command_key(command)
+            if cmd_key:
+                result.append(
+                    Finding(
+                        name=cmd_key,
+                        kind="CLI Command",
+                        provider="Claude Code",
+                        file_path=file_path,
+                        line_number=line_idx,
+                        context=command.strip()[:200],
+                    )
+                )
+        return result
+
+    kind = "MCP Tool" if tool_name.startswith("mcp__") else "Internal Tool"
+    context = json.dumps(tool_input, ensure_ascii=False)[:200]
+    return [
+        Finding(
+            name=tool_name,
+            kind=kind,
+            provider="Claude Code",
+            file_path=file_path,
+            line_number=line_idx,
+            context=context,
+        )
+    ]
+
+
+def scan_claude_code(base_dir: Path, should_cancel: CancelCheck | None = None) -> list[Finding]:
+    """Scan the Claude Code CLI directory (~/.claude) for executed tool calls.
+
+    Only real session transcripts are evaluated. Markdown files below ~/.claude (skills,
+    plugin docs) merely mention commands and are therefore not counted.
+    """
+    if not base_dir.exists():
+        return []
+    return scan_claude_code_sessions(base_dir, should_cancel=should_cancel)
 
 
 def scan_bottleneck_logs(log_path: Path) -> list[Finding]:
@@ -349,12 +464,17 @@ def aggregate_findings(findings: list[Finding]) -> list[AuditEntry]:
 def scan_sources(
     sources: list[tuple[Path, str]],
     progress_callback: Callable[[int, int, str], None] | None = None,
+    should_cancel: CancelCheck | None = None,
 ) -> list[AuditEntry]:
-    """Scan multiple directory sources and aggregate the audit findings."""
+    """Scan multiple directory sources and aggregate the audit findings.
+
+    Raises ScanCancelled as soon as ``should_cancel`` returns True.
+    """
     all_findings: list[Finding] = []
     total = len(sources)
 
     for idx, (path, provider) in enumerate(sources, start=1):
+        _check_cancel(should_cancel)
         if progress_callback:
             progress_callback(idx, total, f"Scanning {provider}: {path.name}")
 
@@ -364,21 +484,30 @@ def scan_sources(
         if provider == "Claude Desktop":
             all_findings.extend(scan_claude_logs(path))
         elif provider == "Antigravity":
-            all_findings.extend(scan_markdown_artifacts(path, provider="Antigravity"))
-            all_findings.extend(scan_tool_logs(path, provider="Antigravity"))
+            all_findings.extend(
+                scan_markdown_artifacts(path, provider="Antigravity", should_cancel=should_cancel)
+            )
+            all_findings.extend(
+                scan_tool_logs(path, provider="Antigravity", should_cancel=should_cancel)
+            )
         elif provider == "GitHub Copilot":
             all_findings.extend(scan_copilot_sessions(path))
         elif provider == "Ollama":
             all_findings.extend(scan_ollama_logs(path))
         elif provider == "Claude Code":
-            all_findings.extend(scan_claude_code(path))
+            all_findings.extend(scan_claude_code(path, should_cancel=should_cancel))
         elif provider == "TokenOptimizer":
             all_findings.extend(scan_bottleneck_logs(path))
         else:
             # Custom Workspace or generic directory
-            all_findings.extend(scan_markdown_artifacts(path, provider=provider))
-            all_findings.extend(scan_tool_logs(path, provider=provider))
+            all_findings.extend(
+                scan_markdown_artifacts(path, provider=provider, should_cancel=should_cancel)
+            )
+            all_findings.extend(
+                scan_tool_logs(path, provider=provider, should_cancel=should_cancel)
+            )
 
+    _check_cancel(should_cancel)
     return aggregate_findings(all_findings)
 
 
@@ -396,9 +525,16 @@ def generate_skill_markdown(entry: AuditEntry) -> str:
         "\n".join(sample_contexts) if sample_contexts else "- Keine Detailzeilen erfasst."
     )
 
+    # JSON strings are valid double-quoted YAML scalars, so ':' or quotes in the name
+    # (e.g. "Bottleneck: ...") can no longer break the frontmatter.
+    description = json.dumps(
+        f"Automates recurring '{entry.name}' workflow discovered by py-agent-audit.",
+        ensure_ascii=False,
+    )
+
     return f"""---
 name: {slug}
-description: Automates recurring '{entry.name}' workflow discovered by py-agent-audit.
+description: {description}
 ---
 
 # {entry.name} Workflow

@@ -1,18 +1,24 @@
+import json
 from pathlib import Path
+
+import pytest
 
 from src.scanner import (
     AuditEntry,
     Finding,
+    ScanCancelled,
     aggregate_findings,
     extract_command_key,
     generate_skill_markdown,
     scan_bottleneck_logs,
+    scan_claude_code,
     scan_claude_logs,
     scan_copilot_sessions,
     scan_markdown_artifacts,
     scan_ollama_logs,
     scan_sources,
     scan_tool_logs,
+    split_shell_commands,
 )
 
 
@@ -165,3 +171,85 @@ def test_scan_bottleneck_logs(tmp_path: Path):
     assert findings[0].kind == "Agent Bottleneck"
     assert findings[0].provider == "TokenOptimizer"
     assert "7 Schritte" in findings[0].context
+
+
+def _tool_use_record(*blocks: dict) -> str:
+    return json.dumps(
+        {"type": "assistant", "message": {"role": "assistant", "content": list(blocks)}}
+    )
+
+
+def test_scan_claude_code_sessions(tmp_path: Path):
+    session_dir = tmp_path / "projects" / "C--Users-dev-repo"
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "user", "message": {"content": "run the tests"}}),
+                _tool_use_record(
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "git status"}},
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "a.py"}},
+                ),
+                _tool_use_record(
+                    {
+                        "type": "tool_use",
+                        "name": "Bash",
+                        "input": {"command": "cd src && npm test"},
+                    },
+                    {"type": "tool_use", "name": "mcp__github__get_issue", "input": {}},
+                ),
+                "not json at all",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    # Markdown below ~/.claude (skills, docs) only mentions commands -> must not count
+    skill_dir = tmp_path / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("```bash\nrm -rf build\n```", encoding="utf-8")
+
+    findings = scan_claude_code(tmp_path)
+    by_name = {(f.name, f.kind) for f in findings}
+    assert ("git status", "CLI Command") in by_name
+    assert ("cd src", "CLI Command") in by_name
+    assert ("npm test", "CLI Command") in by_name
+    assert ("Read", "Internal Tool") in by_name
+    assert ("mcp__github__get_issue", "MCP Tool") in by_name
+    assert not any(f.name.startswith("rm") for f in findings)
+    assert all(f.provider == "Claude Code" for f in findings)
+    git_status = next(f for f in findings if f.name == "git status")
+    assert git_status.line_number == 2
+
+
+def test_split_shell_commands():
+    assert split_shell_commands("cd src && npm test; git status | head -5") == [
+        "cd src",
+        "npm test",
+        "git status",
+        "head -5",
+    ]
+    assert split_shell_commands("ruff check .\npytest -q") == ["ruff check .", "pytest -q"]
+
+
+def test_scan_sources_can_be_cancelled(tmp_path: Path):
+    (tmp_path / "plan.md").write_text("```sh\npytest -v\n```", encoding="utf-8")
+    with pytest.raises(ScanCancelled):
+        scan_sources([(tmp_path, "Workspace")], should_cancel=lambda: True)
+
+
+def test_generate_skill_markdown_frontmatter_is_valid_yaml_scalar():
+    entry = AuditEntry(
+        name="Bottleneck: Tests 'reparieren'",
+        kind="Agent Bottleneck",
+        provider="TokenOptimizer",
+        count=3,
+    )
+    content = generate_skill_markdown(entry)
+    frontmatter = content.split("---")[1]
+    description_line = next(
+        line for line in frontmatter.splitlines() if line.startswith("description:")
+    )
+    value = description_line.removeprefix("description:").strip()
+    # A double-quoted JSON string is a valid YAML scalar even with ':' and quotes inside.
+    assert value.startswith('"')
+    assert "Bottleneck: Tests 'reparieren'" in json.loads(value)

@@ -8,7 +8,7 @@ Ein schlankes, responsives Desktop-Audit-Dashboard zur automatisierten Analyse v
 - **Claude Desktop**: Analysiert MCP-Tool-Aufrufe (`mcp*.log`).
 - **GitHub Copilot**: Durchsucht VS-Code Chat-Sessions (`%APPDATA%/Code/User/globalStorage/emptyWindowChatSessions/*.json`).
 - **Ollama**: Wertet Server-Logs (`%LOCALAPPDATA%/Ollama/server.log`) nach Endpunkten und Modellen aus.
-- **Claude Code**: Liest CLI-Skills und Session-Verläufe (`~/.claude`).
+- **Claude Code**: Wertet die Session-Transkripte (`~/.claude/projects/**/*.jsonl`) aus: Bash-Befehle, eingebaute Tools und MCP-Tool-Aufrufe.
 - **TokenOptimizer**: Erfasst gemeldete Agenten-Engpässe (`~/.mcp_bottlenecks.jsonl`).
 - **Benutzerdefinierte Workspaces**: Eigene Projektverzeichnisse können per Klick hinzugefügt werden.
 
