@@ -10,6 +10,7 @@ from src.scanner import (
     aggregate_findings,
     extract_command_key,
     generate_skill_markdown,
+    get_default_search_paths,
     scan_bottleneck_logs,
     scan_claude_code,
     scan_claude_logs,
@@ -253,3 +254,101 @@ def test_generate_skill_markdown_frontmatter_is_valid_yaml_scalar():
     # A double-quoted JSON string is a valid YAML scalar even with ':' and quotes inside.
     assert value.startswith('"')
     assert "Bottleneck: Tests 'reparieren'" in json.loads(value)
+
+
+def _fake_windows_env(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    appdata = tmp_path / "Roaming"
+    localappdata = tmp_path / "Local"
+    appdata.mkdir()
+    localappdata.mkdir()
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setenv("LOCALAPPDATA", str(localappdata))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    return appdata, localappdata
+
+
+def test_default_paths_find_msix_claude_desktop_logs(tmp_path: Path, monkeypatch):
+    appdata, localappdata = _fake_windows_env(tmp_path, monkeypatch)
+    msix_logs = (
+        localappdata / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude"
+    ) / "logs"
+    msix_logs.mkdir(parents=True)
+    # The real %APPDATA%\Claude exists too, but without logs (typical for the MSIX build)
+    (appdata / "Claude").mkdir()
+
+    assert get_default_search_paths()["Claude Desktop"] == [msix_logs]
+
+
+def test_default_paths_find_classic_claude_desktop_logs(tmp_path: Path, monkeypatch):
+    appdata, _ = _fake_windows_env(tmp_path, monkeypatch)
+    classic_logs = appdata / "Claude" / "logs"
+    classic_logs.mkdir(parents=True)
+
+    assert get_default_search_paths()["Claude Desktop"] == [classic_logs]
+
+
+def test_default_paths_respect_claude_config_dir(tmp_path: Path, monkeypatch):
+    _fake_windows_env(tmp_path, monkeypatch)
+    custom = tmp_path / "custom-claude"
+    custom.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(custom))
+
+    assert custom in get_default_search_paths()["Claude Code"]
+
+
+def _export_conversations() -> list[dict]:
+    return [
+        {
+            "uuid": "c1",
+            "name": "Deploy-Skript debuggen",
+            "chat_messages": [
+                {"sender": "human", "content": [{"type": "text", "text": "Bitte Tests laufen"}]},
+                {
+                    "sender": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Ich starte die Tests."},
+                        {
+                            "type": "tool_use",
+                            "name": "bash_tool",
+                            "input": {"command": "cd app && pytest -q"},
+                        },
+                        {"type": "tool_result", "content": [{"type": "text", "text": "ok"}]},
+                        {"type": "tool_use", "name": "web_search", "input": {"query": "uv"}},
+                    ],
+                },
+            ],
+        }
+    ]
+
+
+def test_scan_claude_export_zip(tmp_path: Path):
+    import zipfile
+
+    export_zip = tmp_path / "data-export.zip"
+    with zipfile.ZipFile(export_zip, "w") as archive:
+        archive.writestr("conversations.json", json.dumps(_export_conversations()))
+        archive.writestr("users.json", json.dumps([{"uuid": "u1"}]))
+        archive.writestr("readme.txt", "not json")
+
+    findings = scan_sources([(export_zip, "Claude App")])
+    names = {(e.name, e.kind) for e in findings}
+    assert ("cd app", "CLI Command") in names
+    assert ("pytest -q", "CLI Command") in names
+    assert ("web_search", "Internal Tool") in names
+    assert all(e.provider == "Claude App" for e in findings)
+    pytest_entry = next(e for e in findings if e.name == "pytest -q")
+    assert "[Deploy-Skript debuggen]" in pytest_entry.findings[0].context
+
+
+def test_scan_claude_export_json_and_folder(tmp_path: Path):
+    folder = tmp_path / "export"
+    folder.mkdir()
+    conversations = folder / "conversations.json"
+    conversations.write_text(json.dumps(_export_conversations()), encoding="utf-8")
+
+    from src.scanner import scan_claude_export
+
+    assert len(scan_claude_export(conversations)) == 3
+    assert len(scan_claude_export(folder)) == 3
+    assert scan_claude_export(tmp_path / "missing.zip") == []

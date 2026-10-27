@@ -28,7 +28,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.mcp_installer import install_to_claude_desktop, is_installed_in_claude_desktop
+from src.mcp_installer import (
+    get_claude_desktop_config_path,
+    install_to_claude_desktop,
+    is_installed_in_claude_desktop,
+)
 from src.scanner import (
     AuditEntry,
     ScanCancelled,
@@ -241,6 +245,7 @@ class MainWindow(QMainWindow):
         self.entries: list[AuditEntry] = []
         self.worker: ScanWorker | None = None
         self.custom_paths: list[Path] = []
+        self.claude_export_path: Path | None = None
         self.selected_entry: AuditEntry | None = None
 
         self.init_ui()
@@ -293,6 +298,20 @@ class MainWindow(QMainWindow):
         )
         sources_layout.addWidget(self.cb_bottlenecks)
 
+        self.cb_claude_app = QCheckBox("Claude-App (–)")
+        self.cb_claude_app.setEnabled(False)
+        self.cb_claude_app.setToolTip(
+            "Chats und Aufgaben aus der Claude-App liegen in der Cloud, nicht lokal.\n"
+            "Exportiere sie unter claude.ai > Einstellungen > Datenschutz > Daten exportieren\n"
+            "und lade die ZIP-Datei über 'Claude-Export...'."
+        )
+        sources_layout.addWidget(self.cb_claude_app)
+
+        self.btn_load_export = QPushButton("Claude-Export...")
+        self.btn_load_export.setToolTip(self.cb_claude_app.toolTip())
+        self.btn_load_export.clicked.connect(self.choose_claude_export)
+        sources_layout.addWidget(self.btn_load_export)
+
         self.btn_add_folder = QPushButton("Workspace-Ordner...")
         self.btn_add_folder.clicked.connect(self.add_custom_folder)
         sources_layout.addWidget(self.btn_add_folder)
@@ -344,6 +363,7 @@ class MainWindow(QMainWindow):
                 "GitHub Copilot",
                 "Ollama",
                 "Claude Code",
+                "Claude App",
                 "TokenOptimizer",
                 "Workspace",
             ]
@@ -422,8 +442,8 @@ class MainWindow(QMainWindow):
         )
         self.btn_install_mcp.setObjectName("installBtn")
         self.btn_install_mcp.setToolTip(
-            "Registriert den TokenOptimizer FastMCP-Server in deiner lokalen Claude Desktop Konfiguration "
-            "(%APPDATA%/Claude/claude_desktop_config.json).\n\n"
+            "Registriert den TokenOptimizer FastMCP-Server in deiner lokalen Claude Desktop "
+            f"Konfiguration ({get_claude_desktop_config_path()}).\n\n"
             "Folgende 5 polyglote Werkzeuge werden Claude zur Verfügung gestellt:\n"
             "• run_compact_checks: Erkennt automatisch Rust (cargo check), Node/TS (npm test / tsc), "
             ".NET (dotnet build) und Python (ruff / pytest) und liefert nur kompakte Fehlerzeilen\n"
@@ -467,6 +487,33 @@ class MainWindow(QMainWindow):
                 count = len(self.custom_paths)
                 self.lbl_custom_count.setText(f"{count} eigene{'r' if count == 1 else ''} Ordner")
                 self.status_label.setText(f"Ordner hinzugefügt: {path}")
+
+    def choose_claude_export(self) -> None:
+        """Let the user pick a claude.ai data export (ZIP or conversations.json)."""
+        start_dir = (
+            str(self.claude_export_path.parent)
+            if self.claude_export_path
+            else str(Path.home() / "Downloads")
+        )
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Claude-Datenexport auswählen",
+            start_dir,
+            "Claude-Export (*.zip *.json);;Alle Dateien (*.*)",
+        )
+        if file_name:
+            self.set_claude_export(Path(file_name))
+
+    def set_claude_export(self, path: Path | None) -> None:
+        """Activate (or clear) the claude.ai export as scan source."""
+        if path is not None and not path.exists():
+            path = None
+        self.claude_export_path = path
+        self.cb_claude_app.setEnabled(path is not None)
+        self.cb_claude_app.setChecked(path is not None)
+        self.cb_claude_app.setText(f"Claude-App ({'✓' if path else '–'})")
+        if path is not None:
+            self.status_label.setText(f"Claude-Export geladen: {path}")
 
     def install_mcp_to_claude(self) -> None:
         """Install the TokenOptimizer FastMCP server into Claude Desktop config."""
@@ -532,6 +579,9 @@ class MainWindow(QMainWindow):
         if self.cb_bottlenecks.isChecked():
             for p in default_paths.get("TokenOptimizer", []):
                 sources.append((p, "TokenOptimizer"))
+
+        if self.cb_claude_app.isChecked() and self.claude_export_path:
+            sources.append((self.claude_export_path, "Claude App"))
 
         for p in self.custom_paths:
             sources.append((p, "Workspace"))
@@ -701,6 +751,9 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geometry)
         else:
             self.resize(1000, 700)
+        export_path = settings.value("claude_export_path")
+        if export_path:
+            self.set_claude_export(Path(str(export_path)))
 
     def closeEvent(self, event) -> None:
         """Persist window geometry and settings on close."""
@@ -709,6 +762,9 @@ class MainWindow(QMainWindow):
             self.worker.wait(5000)
         settings = QSettings("TGBox", "py-agent-audit")
         settings.setValue("geometry", self.saveGeometry())
+        settings.setValue(
+            "claude_export_path", str(self.claude_export_path) if self.claude_export_path else ""
+        )
         super().closeEvent(event)
 
 

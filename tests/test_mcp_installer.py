@@ -92,3 +92,18 @@ def test_default_project_dir_is_package_checkout_not_cwd(tmp_path: Path, monkeyp
     args = json.loads(config_file.read_text(encoding="utf-8"))["mcpServers"][SERVER_NAME]["args"]
     assert args[2] == str(PACKAGE_PROJECT_DIR)
     assert (PACKAGE_PROJECT_DIR / "pyproject.toml").is_file()
+
+
+def test_config_path_prefers_msix_package_folder(tmp_path: Path, monkeypatch):
+    from src.mcp_installer import get_claude_desktop_config_path
+
+    appdata = tmp_path / "Roaming"
+    (appdata / "Claude").mkdir(parents=True)
+    msix_dir = (
+        tmp_path / "Local" / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming"
+    ) / "Claude"
+    msix_dir.mkdir(parents=True)
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+
+    assert get_claude_desktop_config_path() == msix_dir / "claude_desktop_config.json"

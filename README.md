@@ -5,10 +5,11 @@ Ein schlankes, responsives Desktop-Audit-Dashboard zur automatisierten Analyse v
 ## Unterstützte KI-Quellen (Auto-Discovery)
 
 - **Antigravity / Gemini**: Scannt Artefakte (`.md`), Logs und Session-JSONs.
-- **Claude Desktop**: Analysiert MCP-Tool-Aufrufe (`mcp*.log`).
+- **Claude Desktop**: Analysiert MCP-Tool-Aufrufe (`mcp*.log`), sowohl für den klassischen Installer (`%APPDATA%/Claude/logs`) als auch für die Microsoft-Store-Version (`%LOCALAPPDATA%/Packages/Claude_*/LocalCache/Roaming/Claude/logs`).
 - **GitHub Copilot**: Durchsucht VS-Code Chat-Sessions (`%APPDATA%/Code/User/globalStorage/emptyWindowChatSessions/*.json`).
 - **Ollama**: Wertet Server-Logs (`%LOCALAPPDATA%/Ollama/server.log`) nach Endpunkten und Modellen aus.
 - **Claude Code**: Wertet die Session-Transkripte (`~/.claude/projects/**/*.jsonl`) aus: Bash-Befehle, eingebaute Tools und MCP-Tool-Aufrufe.
+- **Claude-App (Chats & Aufgaben)**: Diese liegen in der Cloud. Unter claude.ai > Einstellungen > Datenschutz > *Daten exportieren* den Export anfordern und die ZIP-Datei per Button **„Claude-Export...“** laden. Ausgewertet werden alle Tool-Aufrufe im Export. In Team-/Enterprise-Organisationen muss ein Owner den Export für Mitglieder freischalten.
 - **TokenOptimizer**: Erfasst gemeldete Agenten-Engpässe (`~/.mcp_bottlenecks.jsonl`).
 - **Benutzerdefinierte Workspaces**: Eigene Projektverzeichnisse können per Klick hinzugefügt werden.
 

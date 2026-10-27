@@ -3,8 +3,9 @@
 import json
 import os
 import re
+import zipfile
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -85,11 +86,65 @@ def extract_strings_from_json(data: Any) -> list[str]:
     return strings
 
 
+def _env_path(name: str, default: Path | None = None) -> Path | None:
+    """Return an environment variable as Path, or default if unset/empty.
+
+    Path("") would silently resolve relative to the CWD, so empty values are rejected.
+    """
+    value = os.environ.get(name, "").strip()
+    return Path(value) if value else default
+
+
+def get_claude_desktop_data_dirs() -> list[Path]:
+    """Return existing Claude Desktop data directories, most specific first.
+
+    The Microsoft Store / MSIX build of Claude Desktop does not write to %APPDATA%\\Claude.
+    Windows redirects its AppData writes into the package folder:
+    %LOCALAPPDATA%\\Packages\\Claude_<publisher-id>\\LocalCache\\Roaming\\Claude
+    Other processes (like this scanner) still see the real, often empty %APPDATA%\\Claude.
+    """
+    candidates: list[Path] = []
+    localappdata = _env_path("LOCALAPPDATA")
+    if localappdata is not None:
+        packages = localappdata / "Packages"
+        if packages.is_dir():
+            for package in sorted(packages.glob("Claude_*")):
+                candidates.append(package / "LocalCache" / "Roaming" / "Claude")
+    appdata = _env_path("APPDATA")
+    if appdata is not None:
+        candidates.append(appdata / "Claude")
+
+    result: list[Path] = []
+    for candidate in candidates:
+        if candidate.is_dir() and candidate not in result:
+            result.append(candidate)
+    return result
+
+
+def get_claude_code_dirs() -> list[Path]:
+    """Return existing Claude Code config directories (CLAUDE_CONFIG_DIR, then ~/.claude)."""
+    candidates = [
+        p
+        for p in (
+            _env_path("CLAUDE_CONFIG_DIR"),
+            _env_path("USERPROFILE", Path.home()) / ".claude",
+            Path.home() / ".claude",
+        )
+        if p is not None
+    ]
+    result: list[Path] = []
+    for candidate in candidates:
+        if candidate.is_dir() and candidate not in result:
+            result.append(candidate)
+    return result
+
+
 def get_default_search_paths() -> dict[str, list[Path]]:
     """Return default search directories per provider based on OS environment."""
-    appdata = Path(os.environ.get("APPDATA", ""))
-    localappdata = Path(os.environ.get("LOCALAPPDATA", ""))
-    userprofile = Path(os.environ.get("USERPROFILE", Path.home()))
+    home = Path.home()
+    appdata = _env_path("APPDATA", home / "AppData" / "Roaming")
+    localappdata = _env_path("LOCALAPPDATA", home / "AppData" / "Local")
+    userprofile = _env_path("USERPROFILE", home)
 
     paths: dict[str, list[Path]] = {
         "Claude Desktop": [],
@@ -99,10 +154,11 @@ def get_default_search_paths() -> dict[str, list[Path]]:
         "Claude Code": [],
     }
 
-    # Claude Desktop
-    claude_log_dir = appdata / "Claude" / "logs"
-    if claude_log_dir.exists():
-        paths["Claude Desktop"].append(claude_log_dir)
+    # Claude Desktop (regular installer and Microsoft Store / MSIX build)
+    for data_dir in get_claude_desktop_data_dirs():
+        claude_log_dir = data_dir / "logs"
+        if claude_log_dir.is_dir():
+            paths["Claude Desktop"].append(claude_log_dir)
 
     # Antigravity / Gemini
     ag_candidates = [
@@ -129,9 +185,7 @@ def get_default_search_paths() -> dict[str, list[Path]]:
         paths["Ollama"].append(ollama_log.parent)
 
     # Claude Code CLI
-    claude_code_dir = userprofile / ".claude"
-    if claude_code_dir.exists():
-        paths["Claude Code"].append(claude_code_dir)
+    paths["Claude Code"].extend(get_claude_code_dirs())
 
     # TokenOptimizer Bottlenecks
     bottleneck_log = userprofile / ".mcp_bottlenecks.jsonl"
@@ -361,11 +415,21 @@ def scan_claude_code_sessions(
     return findings
 
 
-def _findings_from_tool_use(block: dict[str, Any], file_path: Path, line_idx: int) -> list[Finding]:
+# Tool names whose "command" input is a shell command line
+SHELL_TOOL_NAMES = {"Bash", "bash", "bash_tool", "PowerShell", "powershell", "run_command"}
+
+
+def _findings_from_tool_use(
+    block: dict[str, Any],
+    file_path: Path,
+    line_idx: int | None,
+    provider: str = "Claude Code",
+    context_prefix: str = "",
+) -> list[Finding]:
     tool_name = str(block["name"])
     tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
 
-    if tool_name == "Bash" and isinstance(tool_input.get("command"), str):
+    if tool_name in SHELL_TOOL_NAMES and isinstance(tool_input.get("command"), str):
         result: list[Finding] = []
         for command in split_shell_commands(tool_input["command"]):
             cmd_key = extract_command_key(command)
@@ -374,24 +438,24 @@ def _findings_from_tool_use(block: dict[str, Any], file_path: Path, line_idx: in
                     Finding(
                         name=cmd_key,
                         kind="CLI Command",
-                        provider="Claude Code",
+                        provider=provider,
                         file_path=file_path,
                         line_number=line_idx,
-                        context=command.strip()[:200],
+                        context=(context_prefix + command.strip())[:200],
                     )
                 )
         return result
 
     kind = "MCP Tool" if tool_name.startswith("mcp__") else "Internal Tool"
-    context = json.dumps(tool_input, ensure_ascii=False)[:200]
+    context = context_prefix + json.dumps(tool_input, ensure_ascii=False)
     return [
         Finding(
             name=tool_name,
             kind=kind,
-            provider="Claude Code",
+            provider=provider,
             file_path=file_path,
             line_number=line_idx,
-            context=context,
+            context=context[:200],
         )
     ]
 
@@ -405,6 +469,83 @@ def scan_claude_code(base_dir: Path, should_cancel: CancelCheck | None = None) -
     if not base_dir.exists():
         return []
     return scan_claude_code_sessions(base_dir, should_cancel=should_cancel)
+
+
+def _iter_export_documents(
+    path: Path, should_cancel: CancelCheck | None = None
+) -> Iterator[tuple[Path, Any]]:
+    """Yield (file, parsed JSON) for a claude.ai export: ZIP, JSON file or extracted folder."""
+    if path.is_dir():
+        for json_file in sorted(path.rglob("*.json")):
+            _check_cancel(should_cancel)
+            try:
+                yield json_file, json.loads(json_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+    elif path.suffix.lower() == ".zip":
+        try:
+            archive = zipfile.ZipFile(path)
+        except (OSError, zipfile.BadZipFile):
+            return
+        with archive:
+            for member in archive.namelist():
+                _check_cancel(should_cancel)
+                if not member.lower().endswith(".json"):
+                    continue
+                try:
+                    data = json.loads(archive.read(member).decode("utf-8"))
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError, KeyError):
+                    continue
+                yield path / member, data
+    elif path.suffix.lower() == ".json":
+        try:
+            yield path, json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+
+def _walk_tool_uses(data: Any, conversation: str = "") -> Iterator[tuple[dict[str, Any], str]]:
+    """Recursively yield (tool_use block, conversation title) from arbitrary JSON.
+
+    The export format is not documented, so instead of relying on a fixed schema every
+    nested ``{"type": "tool_use", "name": ...}`` object is collected.
+    """
+    stack: list[tuple[Any, str]] = [(data, conversation)]
+    while stack:
+        node, title = stack.pop()
+        if isinstance(node, dict):
+            if node.get("type") == "tool_use" and node.get("name"):
+                yield node, title
+                continue
+            # A conversation object carries its title next to its messages
+            if isinstance(node.get("name"), str) and any(
+                key in node for key in ("chat_messages", "messages")
+            ):
+                title = node["name"]
+            stack.extend((value, title) for value in reversed(list(node.values())))
+        elif isinstance(node, list):
+            stack.extend((item, title) for item in reversed(node))
+
+
+def scan_claude_export(path: Path, should_cancel: CancelCheck | None = None) -> list[Finding]:
+    """Scan a claude.ai data export (Settings > Privacy > Export data) for tool calls.
+
+    Accepts the downloaded ZIP, an extracted folder or a single JSON file such as
+    conversations.json. Chats in the Claude app are stored in the cloud, so this export
+    is the only local source for them.
+    """
+    findings: list[Finding] = []
+    if not path.exists():
+        return findings
+    for file_path, data in _iter_export_documents(path, should_cancel):
+        for block, title in _walk_tool_uses(data):
+            prefix = f"[{title}] " if title else ""
+            findings.extend(
+                _findings_from_tool_use(
+                    block, file_path, None, provider="Claude App", context_prefix=prefix
+                )
+            )
+    return findings
 
 
 def scan_bottleneck_logs(log_path: Path) -> list[Finding]:
@@ -496,6 +637,8 @@ def scan_sources(
             all_findings.extend(scan_ollama_logs(path))
         elif provider == "Claude Code":
             all_findings.extend(scan_claude_code(path, should_cancel=should_cancel))
+        elif provider == "Claude App":
+            all_findings.extend(scan_claude_export(path, should_cancel=should_cancel))
         elif provider == "TokenOptimizer":
             all_findings.extend(scan_bottleneck_logs(path))
         else:

@@ -151,3 +151,19 @@ def test_cancel_does_not_block_and_resets_on_cancelled(qapp):
     assert window.btn_scan.isEnabled()
     assert window.btn_scan.text() == "Scan starten"
     assert "abgebrochen" in window.status_label.text()
+
+
+def test_claude_export_source(qapp, tmp_path: Path):
+    window = MainWindow()
+    window.set_claude_export(None)
+    assert not window.cb_claude_app.isEnabled()
+
+    export_zip = tmp_path / "data.zip"
+    export_zip.write_bytes(b"")
+    window.set_claude_export(export_zip)
+    assert window.cb_claude_app.isEnabled()
+    assert window.cb_claude_app.isChecked()
+    assert "✓" in window.cb_claude_app.text()
+
+    window.set_claude_export(tmp_path / "missing.zip")
+    assert window.claude_export_path is None

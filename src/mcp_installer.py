@@ -6,16 +6,27 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from src.scanner import get_claude_desktop_data_dirs
+
 SERVER_NAME = "py-agent-audit-optimizer"
+CONFIG_FILENAME = "claude_desktop_config.json"
 
 # Project root of this checkout (src/mcp_installer.py -> project root), independent of CWD.
 PACKAGE_PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 
 def get_claude_desktop_config_path() -> Path:
-    """Return the platform-specific path to Claude Desktop's configuration file."""
-    appdata = Path(os.environ.get("APPDATA", ""))
-    return appdata / "Claude" / "claude_desktop_config.json"
+    """Return the path to Claude Desktop's configuration file.
+
+    Prefers the Microsoft Store / MSIX data folder (the only one that build reads),
+    falls back to %APPDATA%\\Claude for the regular installer.
+    """
+    data_dirs = get_claude_desktop_data_dirs()
+    if data_dirs:
+        return data_dirs[0] / CONFIG_FILENAME
+    appdata = os.environ.get("APPDATA", "").strip()
+    base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    return base / "Claude" / CONFIG_FILENAME
 
 
 def is_installed_in_claude_desktop(config_path: Path | None = None) -> bool:
