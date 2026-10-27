@@ -11,7 +11,7 @@ import os
 import re
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 try:
@@ -475,7 +475,7 @@ def log_bottleneck(task_description: str, steps_taken: int, reason: str) -> str:
     Records entries into ~/.mcp_bottlenecks.jsonl for subsequent py-agent-audit analysis.
     """
     entry = {
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "timestamp": datetime.now(UTC).astimezone().isoformat(timespec="seconds"),
         "task": task_description,
         "steps": steps_taken,
         "reason": reason,

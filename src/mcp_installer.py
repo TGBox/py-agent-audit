@@ -70,10 +70,12 @@ def install_to_claude_desktop(
     if not (proj / "pyproject.toml").is_file():
         return (
             False,
-            "Projektverzeichnis von py-agent-audit nicht gefunden "
-            f"(keine pyproject.toml in '{proj}').\n"
-            "Die Installation funktioniert nur aus einem Quellcode-Checkout mit uv, "
-            "nicht aus der gebauten Exe.",
+            (
+                "Projektverzeichnis von py-agent-audit nicht gefunden "
+                f"(keine pyproject.toml in '{proj}').\n"
+                "Die Installation funktioniert nur aus einem Quellcode-Checkout mit uv, "
+                "nicht aus der gebauten Exe."
+            ),
         )
 
     try:
@@ -86,14 +88,18 @@ def install_to_claude_desktop(
             except json.JSONDecodeError as exc:
                 return (
                     False,
-                    f"Die bestehende Konfiguration ist kein gültiges JSON und wurde nicht "
-                    f"verändert:\n{path}\n\n{exc}",
+                    (
+                        "Die bestehende Konfiguration ist kein gültiges JSON und wurde nicht "
+                        f"verändert:\n{path}\n\n{exc}"
+                    ),
                 )
             if not isinstance(data, dict):
                 return (
                     False,
-                    f"Unerwartetes Format der bestehenden Konfiguration (kein JSON-Objekt), "
-                    f"Datei wurde nicht verändert:\n{path}",
+                    (
+                        "Unerwartetes Format der bestehenden Konfiguration (kein JSON-Objekt), "
+                        f"Datei wurde nicht verändert:\n{path}"
+                    ),
                 )
             # Create a backup before editing
             shutil.copy2(path, path.with_suffix(".json.bak"))
